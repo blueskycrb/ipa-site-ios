@@ -73,9 +73,25 @@ struct FilesView: View {
     @ViewBuilder
     private func remoteRow(_ file: RemoteFile) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(file.name).font(.subheadline).lineLimit(2)
-            Text("\(fmtSize(file.size)) · \(Date(timeIntervalSince1970: file.mtime).formatted(date: .abbreviated, time: .shortened))")
-                .font(.caption).foregroundColor(.secondary)
+            HStack(alignment: .top, spacing: 10) {
+                if let icon = file.app?.icon {
+                    AppIconView(url: icon, size: 40)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    if let appName = file.app?.name {
+                        (Text(appName).font(.subheadline.weight(.semibold))
+                            + Text(file.app?.version.map { "  v\($0)" } ?? "")
+                            .font(.caption)
+                            .foregroundColor(.secondary))
+                            .lineLimit(1)
+                        Text(file.name).font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                    } else {
+                        Text(file.name).font(.subheadline).lineLimit(2)
+                    }
+                    Text("\(fmtSize(file.size)) · \(Date(timeIntervalSince1970: file.mtime).formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
             if let up = file.alist {
                 alistLine(up)
             }

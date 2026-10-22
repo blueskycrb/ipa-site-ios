@@ -81,11 +81,20 @@ struct UploadRecord: Decodable {
     let error: String?
 }
 
+/// 服务器记录的文件对应的 App 信息（旧版服务器没有这个字段）
+struct FileApp: Decodable {
+    let name: String?
+    let version: String?
+    let icon: String?
+    let bundleID: String?
+}
+
 struct RemoteFile: Decodable, Identifiable {
     let name: String
     let size: Double
     let mtime: Double
     let alist: UploadRecord?
+    let app: FileApp?
     var id: String { name }
 }
 
