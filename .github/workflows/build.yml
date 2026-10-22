@@ -30,6 +30,9 @@ jobs:
             -quiet \
             build
 
+      - name: Show built Info.plist
+        run: plutil -p build/Build/Products/Release-iphoneos/IPASite.app/Info.plist
+
       - name: Package IPA
         run: |
           mkdir -p Payload
