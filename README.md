@@ -1,6 +1,6 @@
 # IPA 下载 · iPhone 客户端
 
-连接内网服务器上的 [ipa-site](../ipa-site)（基于 ipatool 的 IPA 下载站）的原生 SwiftUI 客户端。
+连接内网服务器上的 ipa-site（基于 ipatool 的 IPA 下载站，Docker 部署）的原生 SwiftUI 客户端。
 App 本身不运行 ipatool：搜索、下载、上传 Alist 都由服务器完成，App 负责操作和把 IPA 存到手机。
 
 ## 功能
