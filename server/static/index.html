@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IPA 下载站</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --text: #1c1d21; --muted: #6b7080; --line: #e3e5ea;
+    --accent: #2f6fed; --accent-ink: #ffffff; --ok: #1f9d55; --err: #d14343; --warn: #b7791f;
+    --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121317; --panel: #1b1d22; --text: #e8e9ec; --muted: #9196a3; --line: #2b2e36;
+      --accent: #5b8cff; --accent-ink: #0b0c0f; --ok: #3ecf7c; --err: #ff6b6b; --warn: #f0b04a;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  button, input, select { font: inherit; color: inherit; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 1240px; margin: 0 auto; padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+  .bar h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  .bar .sp { flex: 1; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .btn { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.danger:hover { border-color: var(--err); color: var(--err); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.sm { padding: 3px 9px; font-size: 12px; }
+  main { max-width: 1240px; margin: 0 auto; padding: 16px; display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+  .search { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px; }
+  .search input[type=search] { flex: 1 1 220px; min-width: 0; }
+  input[type=search], input[type=text], input[type=email], input[type=password], select {
+    border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 7px 10px; outline: none; }
+  input:focus, select:focus { border-color: var(--accent); }
+  .opts { display: flex; flex-wrap: wrap; gap: 14px; padding: 0 12px 12px; align-items: center; }
+  .opts label { display: flex; gap: 6px; align-items: center; cursor: pointer; }
+  .notice { padding: 10px 14px; border-radius: 10px; margin-bottom: 12px; border: 1px solid var(--line); background: var(--panel); }
+  .notice.warn { border-color: var(--warn); }
+  .notice code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+  #results { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-top: 12px; }
+  .app { padding: 12px; display: flex; gap: 12px; }
+  .app img, .ph { width: 64px; height: 64px; border-radius: 14px; flex: none; background: var(--bg); border: 1px solid var(--line); object-fit: cover; }
+  .app .info { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .app .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app .name a { color: inherit; text-decoration: none; }
+  .app .name a:hover { text-decoration: underline; }
+  .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+  .tag { font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
+  .tag.free { color: var(--ok); }
+  .actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  aside { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 72px; }
+  @media (max-width: 900px) { aside { position: static; } }
+  .panel-h { display: flex; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); font-weight: 600; gap: 8px; }
+  .panel-h .sp { flex: 1; }
+  .list { max-height: 42vh; overflow: auto; }
+  .row { padding: 10px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; }
+  .row:last-child { border-bottom: 0; }
+  .row img { width: 32px; height: 32px; border-radius: 8px; flex: none; }
+  .row .grow { flex: 1; min-width: 0; }
+  .empty { padding: 18px 12px; text-align: center; color: var(--muted); }
+  .prog { height: 4px; background: var(--bg); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+  .prog > div { height: 100%; background: var(--accent); transition: width .4s; }
+  .prog.indet > div { width: 30%; animation: indet 1.2s infinite ease-in-out; }
+  @keyframes indet { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+  .st-done { color: var(--ok); } .st-error { color: var(--err); } .st-running, .st-queued { color: var(--accent); }
+  .err { color: var(--err); word-break: break-word; }
+  dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--text); padding: 0; width: min(440px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  dialog .body { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  dialog h2 { font-size: 16px; margin: 0; }
+  dialog .foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+  #verDlg { width: min(560px, calc(100vw - 32px)); }
+  #verList { max-height: 55vh; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: calc(100vw - 32px); z-index: 20; }
+  #toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>IPA 下载站</h1>
+    <span id="toolInfo" class="muted small"></span>
+    <span class="sp"></span>
+    <span id="acct" class="muted small ellip"></span>
+    <button id="loginBtn" class="btn sm">登录 Apple ID</button>
+    <button id="logoutBtn" class="btn sm" hidden>退出</button>
+  </div>
+</header>
+
+<main>
+  <section>
+    <div id="notice"></div>
+    <form class="card" id="searchForm">
+      <div class="search">
+        <input type="search" id="q" placeholder="搜索 App 名称，例如：微信、Notion" autofocus>
+        <select id="platform" title="平台">
+          <option value="">iPhone（默认）</option>
+          <option value="ipad">iPad</option>
+          <option value="macos">macOS</option>
+          <option value="appletv">Apple TV</option>
+          <option value="watchos">watchOS</option>
+          <option value="visionos">visionOS</option>
+        </select>
+        <select id="limit" title="结果数量">
+          <option>10</option><option selected>20</option><option>50</option>
+        </select>
+        <button class="btn primary" id="searchBtn">搜索</button>
+      </div>
+      <div class="opts small">
+        <label><input type="checkbox" id="autoPurchase" checked> 没有许可时自动获取（仅限免费 App）</label>
+        <label>信息地区 <input type="text" id="country" maxlength="2" size="3" value="cn"></label>
+      </div>
+    </form>
+    <div id="results"></div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <div class="panel-h">下载任务 <span class="sp"></span><button class="btn sm" id="clearJobs">清除已完成</button></div>
+      <div class="list" id="jobs"><div class="empty">暂无任务</div></div>
+    </div>
+    <div class="card">
+      <div class="panel-h">已下载文件 <span class="sp"></span><button class="btn sm" id="refreshFiles">刷新</button></div>
+      <div class="list" id="files"><div class="empty">暂无文件</div></div>
+      <div class="small muted" id="dlDir" style="padding:8px 12px;border-top:1px solid var(--line);word-break:break-all"></div>
+    </div>
+  </aside>
+</main>
+
+<dialog id="loginDlg">
+  <form method="dialog" id="loginForm">
+    <div class="body">
+      <h2>登录 Apple ID</h2>
+      <div class="small muted">账号密码只会传给本机的 ipatool，凭据由 ipatool 保存在系统钥匙串中。</div>
+      <input type="email" id="email" placeholder="Apple ID 邮箱" autocomplete="username" required>
+      <input type="password" id="password" placeholder="密码" autocomplete="current-password" required>
+      <input type="text" id="code" placeholder="双重认证验证码（先留空点登录，收到后再填）" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+      <div id="loginMsg" class="small"></div>
+    </div>
+    <div class="foot">
+      <button type="button" class="btn" id="loginCancel">取消</button>
+      <button class="btn primary" id="loginSubmit">登录</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="verDlg">
+  <div class="body">
+    <h2 id="verTitle">历史版本</h2>
+    <div class="small muted">下列为 App Store 的版本 ID（最新在前）。点“查看”获取对应版本号；只能下载你 Apple ID 已拥有许可的 App。</div>
+    <input type="search" id="verFilter" placeholder="筛选版本 ID">
+    <div id="verList"></div>
+  </div>
+  <div class="foot"><button class="btn" id="verClose">关闭</button></div>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtSize = n => n == null ? "" : n > 1<<30 ? (n/(1<<30)).toFixed(2)+" GB" : (n/(1<<20)).toFixed(1)+" MB";
+const fmtTime = t => new Date(t*1000).toLocaleString();
+
+function store(key, val) { try { if (val === undefined) return localStorage.getItem(key); localStorage.setItem(key, val); } catch { return null; } }
+
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 3000);
+}
+
+async function api(path, opts = {}) {
+  const init = { method: opts.method || (opts.body ? "POST" : "GET"), headers: {} };
+  if (opts.body) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(opts.body); }
+  const r = await fetch(path, init);
+  const data = await r.json().catch(() => ({ ok: false, error: "服务器响应异常" }));
+  if (!r.ok && data.ok !== false) data.ok = false;
+  return data;
+}
+
+// ---------- 状态 / 登录
+let status = {};
+async function loadStatus() {
+  status = await api("/api/status");
+  $("#toolInfo").textContent = status.ipatool ? `ipatool ${status.version || ""}` : "";
+  $("#dlDir").textContent = "保存位置：" + (status.downloadDir || "") +
+    (status.alist && status.alist.enabled ? `；Alist 目录：${status.alist.dir}${status.alist.auto ? "（下载完自动上传）" : ""}` : "");
+  const acct = status.account;
+  $("#acct").textContent = acct ? `${acct.name || ""} ${acct.email}` : "未登录";
+  $("#loginBtn").hidden = !!acct;
+  $("#logoutBtn").hidden = !acct;
+  const n = $("#notice");
+  if (!status.ipatool) {
+    n.innerHTML = `<div class="notice warn">未找到 <b>ipatool</b>。请从 GitHub 下载 Windows 版 ipatool，把 <code>ipatool.exe</code> 放到 <code>server.py</code> 同目录后刷新页面。</div>`;
+  } else if (!acct) {
+    n.innerHTML = `<div class="notice">搜索和下载需要先 <a href="#" id="nLogin">登录 Apple ID</a>。</div>`;
+    $("#nLogin").onclick = e => { e.preventDefault(); openLogin(); };
+  } else n.innerHTML = "";
+}
+
+function openLogin() { $("#loginMsg").textContent = ""; $("#loginDlg").showModal(); $("#email").focus(); }
+$("#loginBtn").onclick = openLogin;
+$("#loginCancel").onclick = () => $("#loginDlg").close();
+$("#loginForm").onsubmit = async e => {
+  e.preventDefault();
+  const btn = $("#loginSubmit"), msg = $("#loginMsg");
+  const code = $("#code").value.trim();
+  btn.disabled = true; msg.className = "small muted";
+  msg.innerHTML = `<span class="spinner"></span> ` + (code ? "正在验证…" : "登录中…首次登录 ipatool 需要准备，可能要等几分钟");
+  const r = await api("/api/login", { body: { email: $("#email").value, password: $("#password").value, code } });
+  btn.disabled = false;
+  if (r.ok) { $("#password").value = ""; $("#code").value = ""; $("#loginDlg").close(); toast("登录成功"); loadStatus(); return; }
+  msg.className = "small err"; msg.textContent = r.error || "登录失败";
+  if (r.restart) $("#code").value = "";
+  if (r.needCode) $("#code").focus();
+};
+$("#logoutBtn").onclick = async () => {
+  if (!confirm("确定退出当前 Apple ID？")) return;
+  const r = await api("/api/logout", { body: {} });
+  toast(r.ok ? "已退出" : r.error); loadStatus();
+};
+
+// ---------- 搜索
+const savedAuto = store("autoPurchase"); if (savedAuto !== null) $("#autoPurchase").checked = savedAuto === "1";
+$("#autoPurchase").onchange = e => store("autoPurchase", e.target.checked ? "1" : "0");
+const savedCountry = store("country"); if (savedCountry) $("#country").value = savedCountry;
+$("#country").onchange = e => store("country", e.target.value.trim().toLowerCase());
+
+let lastApps = [];
+$("#searchForm").onsubmit = async e => {
+  e.preventDefault();
+  const q = $("#q").value.trim(); if (!q) return;
+  const res = $("#results"), btn = $("#searchBtn");
+  btn.disabled = true;
+  res.innerHTML = `<div class="muted"><span class="spinner"></span> 搜索中…</div>`;
+  const p = new URLSearchParams({ q, limit: $("#limit").value, platform: $("#platform").value, country: $("#country").value || "cn" });
+  const r = await api("/api/search?" + p);
+  btn.disabled = false;
+  if (!r.ok) { res.innerHTML = `<div class="notice err">${esc(r.error)}</div>`; return; }
+  lastApps = r.apps;
+  if (!r.apps.length) { res.innerHTML = `<div class="notice muted">没有找到相关 App</div>`; return; }
+  res.innerHTML = r.apps.map((a, i) => `
+    <div class="card app">
+      ${a.icon ? `<img src="${esc(a.icon)}" alt="" loading="lazy">` : `<div class="ph"></div>`}
+      <div class="info">
+        <div class="name" title="${esc(a.name)}">${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a>` : esc(a.name)}</div>
+        <div class="small muted ellip">${esc(a.seller || "")}</div>
+        <div class="small muted ellip" title="${esc(a.bundleID)}">${esc(a.bundleID)}</div>
+        <div class="tags">
+          <span class="tag">v${esc(a.version)}</span>
+          <span class="tag ${a.price ? "" : "free"}">${a.price ? esc(a.formattedPrice || "¥" + a.price) : "免费"}</span>
+          ${a.size ? `<span class="tag">${fmtSize(a.size)}</span>` : ""}
+          ${a.genre ? `<span class="tag">${esc(a.genre)}</span>` : ""}
+        </div>
+        <div class="actions">
+          <button class="btn sm primary" data-dl="${i}">下载最新版</button>
+          <button class="btn sm" data-ver="${i}">历史版本</button>
+        </div>
+      </div>
+    </div>`).join("");
+};
+$("#results").onclick = e => {
+  const dl = e.target.closest("[data-dl]"), ver = e.target.closest("[data-ver]");
+  if (dl) startDownload(lastApps[dl.dataset.dl]);
+  if (ver) openVersions(lastApps[ver.dataset.ver]);
+};
+
+// ---------- 下载
+async function startDownload(app, versionID, displayVersion) {
+  const r = await api("/api/download", { body: {
+    bundleID: app.bundleID, appID: app.id, name: app.name, icon: app.icon, size: app.size,
+    versionID, displayVersion, platform: $("#platform").value, purchase: $("#autoPurchase").checked,
+    country: $("#country").value || "cn",
+  }});
+  if (!r.ok) return toast(r.error);
+  toast(`已加入下载队列：${app.name}${displayVersion ? " v" + displayVersion : ""}`);
+  pollJobs();
+}
+
+let pollTimer = null;
+async function pollJobs() {
+  clearTimeout(pollTimer);
+  const r = await api("/api/jobs");
+  if (!r.ok) return;
+  const box = $("#jobs");
+  box.innerHTML = r.jobs.length ? r.jobs.map(j => {
+    let st = { queued: "排队中", running: "下载中", done: "完成", error: "失败" }[j.status];
+    let prog = "";
+    if (j.status === "running") {
+      const pct = j.size && j.downloaded ? Math.min(99, j.downloaded / j.size * 100) : null;
+      prog = pct != null ? `<div class="prog"><div style="width:${pct.toFixed(1)}%"></div></div>`
+                         : `<div class="prog indet"><div></div></div>`;
+      if (j.downloaded) st += ` ${fmtSize(j.downloaded)}${j.size ? " / " + fmtSize(j.size) : ""}`;
+      if (j.speed) st += ` · ${fmtSize(j.speed)}/s`;
+    }
+    return `<div class="row">
+      ${j.icon ? `<img src="${esc(j.icon)}" alt="">` : ""}
+      <div class="grow">
+        <div class="ellip">${esc(j.name)}${j.displayVersion ? ` <span class="muted small">v${esc(j.displayVersion)}</span>` : ""}</div>
+        <div class="small st-${j.status}">${st}${j.purchased ? "（已自动获取许可）" : ""}${j.status === "done" && j.finishedAt ? ` · 用时 ${Math.round(j.finishedAt - j.startedAt)} 秒` : ""}</div>
+        ${j.note ? `<div class="small muted">${esc(j.note)}</div>` : ""}
+        ${j.error ? `<div class="small err">${esc(j.error)}</div>` : ""}
+        ${prog}
+      </div>
+      ${j.status === "done" && j.file ? `<a class="btn sm" href="/files/${encodeURIComponent(j.file)}">保存</a>` : ""}
+    </div>`;
+  }).join("") : `<div class="empty">暂无任务</div>`;
+  const active = r.jobs.some(j => j.status === "queued" || j.status === "running");
+  const doneKey = r.jobs.filter(j => j.status === "done").map(j => j.id).join();
+  if (doneKey !== pollJobs.doneKey) { pollJobs.doneKey = doneKey; loadFiles(); }
+  if (active) pollTimer = setTimeout(pollJobs, 1000);
+}
+$("#clearJobs").onclick = async () => { await api("/api/jobs/clear", { body: {} }); pollJobs(); };
+
+function alistState(u) {
+  if (!u) return "";
+  if (u.status === "queued") return `<div class="small st-queued">Alist：排队中</div>`;
+  if (u.status === "running") {
+    const pct = u.size ? u.sent / u.size * 100 : 0;
+    return `<div class="small st-running">Alist：上传中 ${fmtSize(u.sent)} / ${fmtSize(u.size)}</div>
+            <div class="prog"><div style="width:${pct.toFixed(1)}%"></div></div>`;
+  }
+  if (u.status === "done") return `<div class="small st-done ellip" title="${esc(u.remote)}">Alist：已上传到 ${esc(u.remote)}</div>`;
+  return `<div class="small err">Alist 上传失败：${esc(u.error)}</div>`;
+}
+
+let filesTimer = null;
+async function loadFiles() {
+  clearTimeout(filesTimer);
+  const r = await api("/api/files");
+  if (!r.ok) return;
+  const alistOn = status.alist && status.alist.enabled;
+  $("#files").innerHTML = r.files.length ? r.files.map(f => {
+    const busy = f.alist && (f.alist.status === "queued" || f.alist.status === "running");
+    const app = f.app || {};
+    return `
+    <div class="row">
+      ${app.icon ? `<img src="${esc(app.icon)}" alt="">` : ""}
+      <div class="grow">
+        ${app.name
+          ? `<div class="ellip" title="${esc(app.name)}">${esc(app.name)} <span class="muted small">v${esc(app.version)}</span></div>
+             <div class="ellip small muted" title="${esc(f.name)}">${esc(f.name)}</div>`
+          : `<div class="ellip small" title="${esc(f.name)}">${esc(f.name)}</div>`}
+        <div class="small muted">${fmtSize(f.size)} · ${fmtTime(f.mtime)}</div>
+        ${alistState(f.alist)}
+      </div>
+      <a class="btn sm" href="/files/${encodeURIComponent(f.name)}">保存</a>
+      ${status.install && status.install.enabled && app.bundleID ? `<button class="btn sm" data-install="${esc(f.name)}">安装</button>` : ""}
+      ${alistOn ? `<button class="btn sm" data-alist="${esc(f.name)}" ${busy ? "disabled" : ""}>${f.alist && f.alist.status === "done" ? "重传" : "传到 Alist"}</button>` : ""}
+      <button class="btn sm danger" data-del="${esc(f.name)}">删除</button>
+    </div>`;
+  }).join("") : `<div class="empty">暂无文件</div>`;
+  if (r.files.some(f => f.alist && (f.alist.status === "queued" || f.alist.status === "running")))
+    filesTimer = setTimeout(loadFiles, 1500);
+}
+$("#files").onclick = async e => {
+  const inst = e.target.closest("[data-install]");
+  if (inst) {
+    const r = await api("/api/install?" + new URLSearchParams({ name: inst.dataset.install }));
+    if (!r.ok) return toast(r.error);
+    toast(r.source === "alist" ? "从 Alist 安装，请在弹窗里点「安装」" : "从服务器安装，请在弹窗里点「安装」");
+    location.href = r.url;   // itms-services:// 只有 iPhone / iPad 的 Safari 能打开
+    return;
+  }
+  const up = e.target.closest("[data-alist]");
+  if (up) {
+    up.disabled = true;
+    const r = await api("/api/alist/upload", { body: { name: up.dataset.alist } });
+    if (!r.ok) toast(r.error);
+    return loadFiles();
+  }
+  const b = e.target.closest("[data-del]"); if (!b) return;
+  if (!confirm(`删除 ${b.dataset.del}？`)) return;
+  const r = await api("/api/files/" + encodeURIComponent(b.dataset.del), { method: "DELETE" });
+  toast(r.ok ? "已删除" : r.error); loadFiles();
+};
+$("#refreshFiles").onclick = loadFiles;
+
+// ---------- 历史版本
+let verApp = null;
+async function openVersions(app) {
+  verApp = app;
+  $("#verTitle").textContent = `${app.name} · 历史版本`;
+  $("#verFilter").value = "";
+  $("#verList").innerHTML = `<div class="empty"><span class="spinner"></span> 正在获取版本列表…</div>`;
+  $("#verDlg").showModal();
+  const r = await api("/api/versions?" + new URLSearchParams({ bundle: app.bundleID, id: app.id }));
+  if (verApp !== app) return;
+  if (!r.ok) { $("#verList").innerHTML = `<div class="empty err">${esc(r.error)}</div>`; return; }
+  $("#verList").innerHTML = r.versions.length ? r.versions.map((v, i) => `
+    <div class="row" data-vid="${esc(v)}">
+      <div class="grow"><div>${esc(v)}${i === 0 ? ` <span class="tag">最新</span>` : ""}</div>
+        <div class="small muted vmeta"></div></div>
+      <button class="btn sm" data-meta>查看</button>
+      <button class="btn sm primary" data-vdl>下载</button>
+    </div>`).join("") : `<div class="empty">没有版本信息</div>`;
+}
+$("#verFilter").oninput = e => {
+  const q = e.target.value.trim();
+  document.querySelectorAll("#verList .row").forEach(r => r.hidden = q && !r.dataset.vid.includes(q));
+};
+$("#verList").onclick = async e => {
+  const row = e.target.closest("[data-vid]"); if (!row) return;
+  const vid = row.dataset.vid, meta = row.querySelector(".vmeta");
+  if (e.target.closest("[data-meta]")) {
+    meta.innerHTML = `<span class="spinner"></span>`;
+    const r = await api("/api/version-meta?" + new URLSearchParams({ bundle: verApp.bundleID, id: verApp.id, vid }));
+    if (r.ok) { row.dataset.ver = r.displayVersion || ""; meta.textContent = `版本 ${r.displayVersion || "?"} · ${r.releaseDate ? new Date(r.releaseDate).toLocaleDateString() : ""}`; }
+    else { meta.className = "small err vmeta"; meta.textContent = r.error; }
+  }
+  if (e.target.closest("[data-vdl]")) startDownload(verApp, vid, row.dataset.ver || `ID ${vid}`);
+};
+$("#verClose").onclick = () => $("#verDlg").close();
+
+loadStatus().then(loadFiles); pollJobs();
+</script>
+</body>
+</html>

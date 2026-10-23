@@ -1,0 +1,9 @@
+ipatool.exe
+ipatool
+bin/
+downloads/
+.keychain-passphrase
+.env
+__pycache__/
+*.pyc
+start.bat

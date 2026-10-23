@@ -1,0 +1,12 @@
+# 运行时数据和本机文件，不要提交
+.env
+data/
+downloads/
+.keychain-passphrase
+.link-secret
+firewall.backup
+ipatool
+ipatool.exe
+bin/
+__pycache__/
+*.pyc

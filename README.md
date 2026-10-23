@@ -1,42 +1,77 @@
-# IPA 下载 · iPhone 客户端
+# IPA 下载
 
-连接内网服务器上的 ipa-site（基于 ipatool 的 IPA 下载站，Docker 部署）的原生 SwiftUI 客户端。
-App 本身不运行 ipatool：搜索、下载、上传 Alist 都由服务器完成，App 负责操作和把 IPA 存到手机。
+自己搭的 App Store IPA 下载服务，分两部分：
 
-## 功能
+| 部分 | 目录 | 说明 |
+|---|---|---|
+| **下载服务（服务端）** | [`server/`](server/) | 基于 [ipatool](https://github.com/majd/ipatool)，Docker 部署在自己的服务器上：登录 Apple ID、搜索、下载 IPA、上传 Alist、生成安装链接，自带网页 |
+| **iPhone 客户端** | 仓库根目录 | SwiftUI App，连接上面的服务端使用；GitHub Actions 自动编译未签名 IPA |
 
-- **搜索**：按平台搜索 App，下载最新版或从历史版本里挑一个下载（下载到服务器）
-- **任务**：查看服务器上的下载进度、速度、用时
-- **文件**：服务器上的 IPA 可以「存到手机」「传到 Alist」或删除；存到手机的 IPA 在「文件」App →「我的 iPhone」→「IPA 下载」里，也能通过分享发给 TrollStore 等工具
-- **设置**：服务器地址、网站访问密码（如果设置了）、登录 Apple ID（支持双重认证）、自动获取免费 App 许可
+```
+iPhone 客户端 / 网页  ──HTTP(S)──▶  下载服务（Docker）  ──ipatool──▶  App Store
+                                         │
+                                         └──▶  Alist（可选，网盘直链下载 / 安装）
+```
 
-## 获取 IPA
+---
 
-每次推送到 `main`，GitHub Actions 会在 macOS 上编译出**未签名**的 IPA，并发布到 [Releases](https://github.com/blueskycrb/ipa-site-ios/releases)。最新版的固定下载地址：
+## 一、部署下载服务（Docker）
+
+```bash
+git clone https://github.com/blueskycrb/ipa-site-ios.git
+cd ipa-site-ios/server
+cp .env.example .env      # 至少填 IPA_PASSWORD，其他按需
+vi .env
+docker compose up -d --build
+```
+
+浏览器打开 `http://服务器IP:8686`，登录 Apple ID 即可使用。
+
+**所有配置项（`.env`）的说明、外网访问、HTTPS、Alist、常见问题，见 [server/README.md](server/README.md)。** 配置模板 [server/.env.example](server/.env.example) 里每一项也都有注释。
+
+常用的几项：
+
+| 变量 | 作用 |
+|---|---|
+| `IPA_PASSWORD` | 网站访问密码（对外开放时必填） |
+| `IPA_COUNTRY` | Apple ID 所在地区，如 `cn` |
+| `ALIST_URL` / `ALIST_USERNAME` / `ALIST_PASSWORD` / `ALIST_DIR` | 上传到 Alist |
+| `ALIST_AUTO_UPLOAD` | `1` 下载完自动上传，`0` 手动 |
+| `IPA_PUBLIC_URL` | https 地址，iPhone「系统安装」需要 |
+
+改完 `.env` 要运行 `docker compose up -d` 才生效。
+
+---
+
+## 二、iPhone 客户端
+
+### 功能
+
+- **搜索**：按平台搜索 App，下载最新版或从历史版本里挑一个（下载到服务器）
+- **任务**：服务器上的下载进度、速度、用时；完成后可直接安装
+- **文件**：服务器上的 IPA 可以安装、存到手机（从服务器或 Alist 网盘直链）、传到 Alist、删除
+- **Alist**：浏览 Alist 上传目录，用网盘直链存到手机或安装，不受家里上行带宽限制
+- **设置**：服务器地址、网站访问密码、登录 Apple ID（支持双重认证）、安装方式（系统安装 / TrollStore）、检查更新
+
+### 获取与安装
+
+每次 App 代码有改动，GitHub Actions 会编译**未签名**的 IPA 并发布到 [Releases](https://github.com/blueskycrb/ipa-site-ios/releases)（只改服务端或文档不会发版）。最新版固定下载地址：
 
 ```
 https://github.com/blueskycrb/ipa-site-ios/releases/latest/download/IPASite.ipa
 ```
 
-装了 TrollStore 的话，在 Safari 地址栏打开下面这个链接就能直接安装最新版：
+- **TrollStore**：在 Safari 地址栏打开下面的链接，直接安装最新版；之后 App 启动时会自动检查更新，有新版提示用 TrollStore 安装（也可在「设置 → 关于」手动检查）
 
-```
-apple-magnifier://install?url=https%3A%2F%2Fgithub.com%2Fblueskycrb%2Fipa-site-ios%2Freleases%2Flatest%2Fdownload%2FIPASite.ipa
-```
+  ```
+  apple-magnifier://install?url=https%3A%2F%2Fgithub.com%2Fblueskycrb%2Fipa-site-ios%2Freleases%2Flatest%2Fdownload%2FIPASite.ipa
+  ```
 
-装好之后，App 启动时会自动检查更新，有新版会提示用 TrollStore 安装；也可以在「设置 → 关于」里手动检查。
+- **Sideloadly / AltStore**：下载上面的 IPA，用自己的 Apple ID 签名安装。免费 Apple ID 签名 7 天有效，到期重签即可（数据不会丢）
 
-## 安装到 iPhone
+首次打开 App：在「设置」里填服务器地址（如 `http://192.168.1.10:8686` 或你的 https 域名）和网站访问密码，点「测试连接」。iOS 询问是否允许访问本地网络时选「允许」。
 
-未签名的 IPA 需要用你自己的 Apple ID 签名后安装，任选一种：
-
-- **Sideloadly**（Windows / Mac）：手机用数据线连电脑，把 IPA 拖进 Sideloadly，填 Apple ID，点 Start。免费 Apple ID 签名 **7 天有效**，到期重新签一次即可（数据不会丢）。
-- **AltStore**：装好 AltServer 后可以在手机上自动续签。
-- **TrollStore**（支持的 iOS 版本才能用）：直接安装，永久有效。
-
-首次打开 App：在「设置」里确认服务器地址（默认 `http://ip:8686`），iOS 会询问是否允许访问本地网络，选「允许」。
-
-## 本地开发
+### 本地开发
 
 需要 macOS + Xcode 15 以上：
 

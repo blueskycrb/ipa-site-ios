@@ -1,0 +1,53 @@
+services:
+  ipa-site:
+    build: .
+    image: ipa-site:latest
+    container_name: ipa-site
+    restart: unless-stopped
+    environment:
+      # 不设密码时网站会拒绝启动，除非明确设置 IPA_ALLOW_NO_PASSWORD=1（仅限可信内网）
+      IPA_PASSWORD: ${IPA_PASSWORD:-}
+      IPA_ALLOW_NO_PASSWORD: ${IPA_ALLOW_NO_PASSWORD:-0}
+      IPA_COUNTRY: ${IPA_COUNTRY:-cn}
+      IPA_CONCURRENCY: ${IPA_CONCURRENCY:-3}
+      # 上传到 Alist（不填 ALIST_URL 就不显示上传按钮）
+      ALIST_URL: ${ALIST_URL:-}
+      ALIST_USERNAME: ${ALIST_USERNAME:-}
+      ALIST_PASSWORD: ${ALIST_PASSWORD:-}
+      ALIST_DIR: ${ALIST_DIR:-/}
+      ALIST_AUTO_UPLOAD: ${ALIST_AUTO_UPLOAD:-0}
+      # 直接安装需要的 https 地址（例如 Lucky 反代出来的），留空则不能直接安装
+      IPA_PUBLIC_URL: ${IPA_PUBLIC_URL:-}
+      # 服务器需要走代理才能访问 Apple 时再打开，例如 http://192.168.1.2:7890
+      # HTTPS_PROXY: ${HTTPS_PROXY:-}
+    # ipatool 用网卡 MAC 生成“设备标识”。固定下来，重建容器后 Apple 仍认为是同一台设备，
+    # 不用重新登录。不要和局域网里其他设备重复。
+    mac_address: "02:42:ac:1f:5a:3c"
+    ports:
+      # IPv4 和 IPv6 各一行。用下面的 Caddy 时，在 .env 里设 IPA_BIND=127.0.0.1、IPA_BIND6=[::1]
+      - "${IPA_BIND:-0.0.0.0}:8686:8686"
+      - "${IPA_BIND6:-[::]}:8686:8686"
+    volumes:
+      # 默认用 Docker 卷 ipa-data；在 .env 里把 IPA_DATA 设成目录（如 ./data）则直接存到该目录
+      - ${IPA_DATA:-ipa-data}:/data
+
+  # 可选：有域名、并且服务器 80/443 端口能从公网访问时，用 Caddy 自动申请 HTTPS 证书。
+  # 启动方式：docker compose --profile https up -d
+  caddy:
+    image: caddy:2.8.4
+    profiles: ["https"]
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - ipa-site
+
+volumes:
+  ipa-data:
+  caddy-data:
