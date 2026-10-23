@@ -159,8 +159,8 @@
 <dialog id="verDlg">
   <div class="body">
     <h2 id="verTitle">历史版本</h2>
-    <div class="small muted">下列为 App Store 的版本 ID（最新在前）。点“查看”获取对应版本号；只能下载你 Apple ID 已拥有许可的 App。</div>
-    <input type="search" id="verFilter" placeholder="筛选版本 ID">
+    <div class="small muted">最新在前。版本号和发布日期会在滚动到时自动查询（每个版本要问 Apple，可能要几秒到一分钟），查过的服务器会记住，下次直接显示；只能下载你 Apple ID 已拥有许可的 App。</div>
+    <input type="search" id="verFilter" placeholder="筛选版本号或版本 ID">
     <div id="verList"></div>
   </div>
   <div class="foot"><button class="btn" id="verClose">关闭</button></div>
@@ -389,9 +389,46 @@ $("#files").onclick = async e => {
 $("#refreshFiles").onclick = loadFiles;
 
 // ---------- 历史版本
-let verApp = null;
+// 版本号在行滚动到可见区域时自动查询，同时最多 3 个；查过的服务器会记住，下次直接返回
+let verApp = null, verQueue = [], verActive = 0, verObserver = null;
+
+function showVersionInfo(row, info) {
+  row.dataset.ver = info.displayVersion || "";
+  row.querySelector(".vname").textContent = info.displayVersion || "版本号未知";
+  row.querySelector(".vmeta").textContent =
+    `${info.releaseDate ? info.releaseDate.slice(0, 10) + " · " : ""}ID ${row.dataset.vid}`;
+}
+
+function queueVersion(row) {
+  if (row.dataset.state) return;
+  row.dataset.state = "queued";
+  verQueue.push(row);
+  pumpVersions();
+}
+
+function pumpVersions() {
+  while (verActive < 3 && verQueue.length) {
+    const row = verQueue.shift();
+    if (!row.isConnected) continue;
+    verActive++;
+    lookUpVersion(row).finally(() => { verActive--; pumpVersions(); });
+  }
+}
+
+async function lookUpVersion(row) {
+  const app = verApp;
+  row.querySelector(".vname").innerHTML = `<span class="spinner"></span> <span class="muted small">查询版本号…</span>`;
+  const r = await api("/api/version-meta?" + new URLSearchParams({ bundle: app.bundleID, id: app.id, vid: row.dataset.vid }));
+  if (verApp !== app) return;
+  if (r.ok) { row.dataset.state = "done"; showVersionInfo(row, r); return; }
+  row.dataset.state = "error";
+  row.querySelector(".vname").textContent = "版本号未知";
+  row.querySelector(".vmeta").innerHTML = `<span class="err">${esc(r.error)}</span> <a href="#" data-retry>重试</a>`;
+}
+
 async function openVersions(app) {
-  verApp = app;
+  verApp = app; verQueue = [];
+  if (verObserver) verObserver.disconnect();
   $("#verTitle").textContent = `${app.name} · 历史版本`;
   $("#verFilter").value = "";
   $("#verList").innerHTML = `<div class="empty"><span class="spinner"></span> 正在获取版本列表…</div>`;
@@ -401,26 +438,33 @@ async function openVersions(app) {
   if (!r.ok) { $("#verList").innerHTML = `<div class="empty err">${esc(r.error)}</div>`; return; }
   $("#verList").innerHTML = r.versions.length ? r.versions.map((v, i) => `
     <div class="row" data-vid="${esc(v)}">
-      <div class="grow"><div>${esc(v)}${i === 0 ? ` <span class="tag">最新</span>` : ""}</div>
-        <div class="small muted vmeta"></div></div>
-      <button class="btn sm" data-meta>查看</button>
+      <div class="grow"><div><b class="vname"></b>${i === 0 ? ` <span class="tag">最新</span>` : ""}</div>
+        <div class="small muted vmeta">ID ${esc(v)}</div></div>
       <button class="btn sm primary" data-vdl>下载</button>
     </div>`).join("") : `<div class="empty">没有版本信息</div>`;
+  const known = r.meta || {};
+  verObserver = new IntersectionObserver(entries => entries.forEach(en => {
+    if (en.isIntersecting) queueVersion(en.target);
+  }), { root: $("#verList") });
+  document.querySelectorAll("#verList .row").forEach(row => {
+    const info = known[row.dataset.vid];
+    if (info) { row.dataset.state = "done"; showVersionInfo(row, info); }
+    else verObserver.observe(row);
+  });
 }
 $("#verFilter").oninput = e => {
   const q = e.target.value.trim();
-  document.querySelectorAll("#verList .row").forEach(r => r.hidden = q && !r.dataset.vid.includes(q));
+  document.querySelectorAll("#verList .row").forEach(r =>
+    r.hidden = q && !r.dataset.vid.includes(q) && !(r.dataset.ver || "").includes(q));
 };
 $("#verList").onclick = async e => {
   const row = e.target.closest("[data-vid]"); if (!row) return;
-  const vid = row.dataset.vid, meta = row.querySelector(".vmeta");
-  if (e.target.closest("[data-meta]")) {
-    meta.innerHTML = `<span class="spinner"></span>`;
-    const r = await api("/api/version-meta?" + new URLSearchParams({ bundle: verApp.bundleID, id: verApp.id, vid }));
-    if (r.ok) { row.dataset.ver = r.displayVersion || ""; meta.textContent = `版本 ${r.displayVersion || "?"} · ${r.releaseDate ? new Date(r.releaseDate).toLocaleDateString() : ""}`; }
-    else { meta.className = "small err vmeta"; meta.textContent = r.error; }
+  if (e.target.closest("[data-retry]")) {
+    e.preventDefault();
+    delete row.dataset.state;
+    return queueVersion(row);
   }
-  if (e.target.closest("[data-vdl]")) startDownload(verApp, vid, row.dataset.ver || `ID ${vid}`);
+  if (e.target.closest("[data-vdl]")) startDownload(verApp, row.dataset.vid, row.dataset.ver || `ID ${row.dataset.vid}`);
 };
 $("#verClose").onclick = () => $("#verDlg").close();
 

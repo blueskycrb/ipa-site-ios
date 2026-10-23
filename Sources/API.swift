@@ -141,7 +141,16 @@ struct AlistPage: Decodable {
 private struct LinkResponse: Decodable { let url: String?; let size: Double? }
 private struct InstallResponse: Decodable { let ok: Bool; let url: String?; let source: String?; let error: String? }
 private struct SearchResponse: Decodable { let apps: [AppItem]? }
-private struct VersionsResponse: Decodable { let versions: [String]? }
+/// 某个版本 ID 对应的版本号和发布日期
+struct VersionInfo: Decodable {
+    let displayVersion: String?
+    let releaseDate: String?
+}
+
+private struct VersionsResponse: Decodable {
+    let versions: [String]?
+    let meta: [String: VersionInfo]?   // 服务器已经查过的版本（旧版服务器没有这个字段）
+}
 private struct JobsResponse: Decodable { let jobs: [Job]? }
 private struct FilesResponse: Decodable { let files: [RemoteFile]? }
 
@@ -228,14 +237,17 @@ enum API {
         return try await send(SearchResponse.self, request("/api/search", query: query)).apps ?? []
     }
 
-    static func versions(_ app: AppItem) async throws -> [String] {
+    /// 返回版本 ID 列表（最新在前）和服务器已缓存的版本信息
+    static func versions(_ app: AppItem) async throws -> ([String], [String: VersionInfo]) {
         let query = ["bundle": app.bundleID ?? "", "id": String(app.appID ?? 0)]
-        return try await send(VersionsResponse.self, request("/api/versions", query: query, timeout: 120)).versions ?? []
+        let r = try await send(VersionsResponse.self, request("/api/versions", query: query, timeout: 120))
+        return (r.versions ?? [], r.meta ?? [:])
     }
 
     static func versionMeta(_ app: AppItem, versionID: String) async throws -> VersionMeta {
         let query = ["bundle": app.bundleID ?? "", "id": String(app.appID ?? 0), "vid": versionID]
-        return try await send(VersionMeta.self, request("/api/version-meta", query: query, timeout: 120))
+        // 服务器最多等 Apple 180 秒，再加上排队时间
+        return try await send(VersionMeta.self, request("/api/version-meta", query: query, timeout: 300))
     }
 
     static func download(_ app: AppItem, versionID: String? = nil, displayVersion: String? = nil) async throws {

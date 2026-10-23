@@ -815,6 +815,38 @@ def load_link_secret():
 LINK_SECRET = load_link_secret()
 
 
+# ---------------------------------------------------------------- 历史版本信息缓存
+#
+# 版本 ID 对应的版本号、发布日期不会再变，查过一次就存下来。每查一个版本都要向 Apple 发一次请求，
+# 所以同时最多查 3 个，避免一次打开几百个版本时请求太密。
+
+VERSION_CACHE_FILE = PASSPHRASE_FILE.parent / ".version-cache.json"
+_version_cache_lock = threading.Lock()
+_version_lookup_slots = threading.BoundedSemaphore(3)
+
+
+def _load_version_cache():
+    try:
+        return json.loads(VERSION_CACHE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+_version_cache = _load_version_cache()
+
+
+def version_key(app, vid):
+    return f"{app}:{vid}"
+
+
+def remember_version(app, vid, info):
+    with _version_cache_lock:
+        _version_cache[version_key(app, vid)] = info
+        tmp = VERSION_CACHE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_version_cache, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, VERSION_CACHE_FILE)
+
+
 def install_enabled():
     return PUBLIC_URL.startswith("https://")
 
@@ -1204,15 +1236,27 @@ class Handler(BaseHTTPRequestHandler):
         args = ["list-versions", "-b", bundle] if bundle else ["list-versions", "-i", q.get("id", "0")]
         lines = run_ipatool(args, timeout=60)
         ids = pick(lines, "externalVersionIdentifiers").get("externalVersionIdentifiers") or []
-        # 最新版本放最前
-        self.send_json({"ok": True, "versions": [str(v) for v in reversed(ids)]})
+        versions = [str(v) for v in reversed(ids)]   # 最新版本放最前
+        app = bundle or q.get("id", "0")
+        # 顺带返回已经查过的版本号，客户端可以直接显示
+        known = {v: _version_cache[version_key(app, v)] for v in versions if version_key(app, v) in _version_cache}
+        self.send_json({"ok": True, "versions": versions, "meta": known})
 
     def api_version_meta(self, q):
-        args = ["get-version-metadata", "--external-version-id", q.get("vid", "")]
+        vid = q.get("vid", "")
+        app = q.get("bundle") or q.get("id", "0")
+        cached = _version_cache.get(version_key(app, vid))
+        if cached:
+            return self.send_json({"ok": True, "cached": True, **cached})
+        args = ["get-version-metadata", "--external-version-id", vid]
         args += ["-b", q["bundle"]] if q.get("bundle") else ["-i", q.get("id", "0")]
-        info = pick(run_ipatool(args, timeout=60), "displayVersion")
-        self.send_json({"ok": True, "displayVersion": info.get("displayVersion"),
-                        "releaseDate": info.get("releaseDate")})
+        with _version_lookup_slots:
+            # Apple 回得很慢：已拥有的 App 约 10 秒，没下载过的可能要一分钟
+            info = pick(run_ipatool(args, timeout=180), "displayVersion")
+        result = {"displayVersion": info.get("displayVersion"), "releaseDate": info.get("releaseDate")}
+        if result["displayVersion"]:
+            remember_version(app, vid, result)
+        self.send_json({"ok": True, **result})
 
     def api_purchase(self, d):
         run_ipatool(["purchase", "-b", d.get("bundleID", "")], timeout=90)

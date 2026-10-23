@@ -132,6 +132,7 @@ docker compose logs -f ipa-site
 | `.ipatool/` | ipatool 的 Apple ID 登录状态（已加密） |
 | `.keychain-passphrase` | 解密上面登录状态的口令，首次启动自动生成。**删了就要重新登录 Apple ID，也不要外传** |
 | `.link-secret` | 安装链接的签名密钥，自动生成 |
+| `.version-cache.json` | 查过的历史版本号和发布日期（不会变，查一次就记住，删了只是要重新查） |
 | `downloads/` | 下载的 IPA；`downloads/.meta.json` 记录每个文件的应用名、版本、图标 |
 
 ---
