@@ -5,6 +5,7 @@ struct SettingsView: View {
     @AppStorage(Keys.sitePassword) private var sitePassword = ""
     @AppStorage(Keys.autoPurchase) private var autoPurchase = true
     @AppStorage(Keys.country) private var country = "cn"
+    @AppStorage(Keys.installMode) private var installMode = "trollstore"
     @State private var status: ServerStatus?
     @State private var statusError: String?
     @State private var checking = false
@@ -73,19 +74,26 @@ struct SettingsView: View {
                         .autocorrectionDisabled()
                 }
 
-                if let s = status {
-                    Section {
-                        if s.install?.enabled == true {
-                            LabeledContent("已启用", value: s.install?.publicURL ?? "")
+                Section {
+                    Picker("安装方式", selection: $installMode) {
+                        Text("TrollStore").tag("trollstore")
+                        Text("系统安装").tag("system")
+                    }
+                    .pickerStyle(.segmented)
+                    if installMode == "system" {
+                        if status?.install?.enabled == true {
+                            LabeledContent("已启用", value: status?.install?.publicURL ?? "")
                         } else {
                             Text("未启用：需要先给网站配好 https 地址（例如 Lucky 反代 + 证书），再在服务器 .env 里设置 IPA_PUBLIC_URL。")
                                 .font(.caption).foregroundColor(.secondary)
                         }
-                    } header: {
-                        Text("直接安装")
-                    } footer: {
-                        Text("App Store 下载的 IPA 是按下载它的 Apple ID 授权的，装好后打开时可能需要手机登录同一个 Apple ID。点「安装」后回到主屏幕查看进度。")
                     }
+                } header: {
+                    Text("安装")
+                } footer: {
+                    Text(installMode == "trollstore"
+                         ? "点「TrollStore 安装」会把下载链接交给 TrollStore（需 2.0 以上），它自己下载并安装，任何 IPA 都行，不用先存到手机。"
+                         : "系统安装只对本站从 App Store 下载的 IPA 有效，装好后打开时可能需要手机登录同一个 Apple ID。点「安装」后回到主屏幕查看进度。")
                 }
 
                 if let a = status?.alist, a.enabled {

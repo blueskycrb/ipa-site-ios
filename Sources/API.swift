@@ -8,6 +8,7 @@ enum Keys {
     static let autoPurchase = "autoPurchase"
     static let country = "country"
     static let platform = "platform"
+    static let installMode = "installMode"   // "trollstore" 或 "system"
     static let defaultServer = "http://192.168.10.136:8686"
 }
 
@@ -293,10 +294,11 @@ enum API {
         return u
     }
 
-    /// 返回 itms-services:// 安装链接；source 为 auto / server / alist
-    static func installURL(_ name: String, source: String = "auto") async throws -> (URL, String) {
-        let r = try await send(InstallResponse.self, request("/api/install", query: ["name": name, "source": source], timeout: 60),
-                               allowNotOK: true)
+    /// 返回安装链接：mode 为 trollstore 时是 apple-magnifier://install?url=…，否则是 itms-services://
+    /// source 为 auto / server / alist（auto 时 Alist 里有就走网盘直链）
+    static func installURL(_ name: String, mode: String, source: String = "auto") async throws -> (URL, String) {
+        let query = ["name": name, "source": source, "mode": mode == "trollstore" ? "trollstore" : "itms"]
+        let r = try await send(InstallResponse.self, request("/api/install", query: query, timeout: 60), allowNotOK: true)
         guard r.ok, let s = r.url, let u = URL(string: s) else {
             throw APIError(message: r.error ?? "生成安装链接失败")
         }

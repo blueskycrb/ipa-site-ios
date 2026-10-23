@@ -104,9 +104,8 @@ struct FilesView: View {
             HStack {
                 SaveToPhoneButton(name: file.name, alistAvailable: alist?.enabled == true && file.alist?.status != "error",
                                   phone: phone, toast: $toast)
-                if install?.enabled == true && file.app?.bundleID != nil {
-                    InstallButton(name: file.name, toast: $toast)
-                }
+                InstallButton(name: file.name, systemAvailable: install?.enabled == true && file.app?.bundleID != nil,
+                              toast: $toast)
                 if alist?.enabled == true {
                     Button(file.alist?.status == "done" ? "重传" : "传到 Alist") {
                         Task { await upload(file) }

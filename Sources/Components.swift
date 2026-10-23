@@ -15,29 +15,46 @@ struct AppIconView: View {
     }
 }
 
-/// 「安装」：向服务器要 itms-services 安装链接并打开，iOS 会弹出安装确认
+/// 安装按钮。按「设置」里的安装方式：
+/// - TrollStore：打开 apple-magnifier://install?url=…，TrollStore 自己下载并安装，任何 IPA 都行
+/// - 系统安装：打开 itms-services:// 链接，只对本站从 App Store 下载的 IPA 有效（systemAvailable）
 struct InstallButton: View {
     let name: String
+    let systemAvailable: Bool
     @Binding var toast: String?
+    @AppStorage(Keys.installMode) private var mode = "trollstore"
     @Environment(\.openURL) private var openURL
     @State private var working = false
 
+    private var useTrollStore: Bool {
+        mode == "trollstore" && [".ipa", ".tipa"].contains { name.lowercased().hasSuffix($0) }
+    }
+
     var body: some View {
-        Button(working ? "准备中…" : "安装") {
-            Task {
-                working = true
-                do {
-                    let (url, source) = try await API.installURL(name)
-                    toast = (source == "alist" ? "从 Alist 安装" : "从服务器安装") + "：在弹窗里点「安装」，再回到主屏幕看进度"
-                    openURL(url)
-                } catch {
-                    toast = error.localizedDescription
-                }
-                working = false
+        if useTrollStore || systemAvailable {
+            Button(working ? "准备中…" : (useTrollStore ? "TrollStore 安装" : "安装")) {
+                Task { await install() }
             }
+            .buttonStyle(.bordered)
+            .disabled(working)
         }
-        .buttonStyle(.bordered)
-        .disabled(working)
+    }
+
+    private func install() async {
+        working = true
+        do {
+            let (url, source) = try await API.installURL(name, mode: useTrollStore ? "trollstore" : "system")
+            let from = source == "alist" ? "从 Alist 网盘" : "从服务器"
+            toast = useTrollStore ? "\(from)交给 TrollStore 下载安装" : "\(from)安装：在弹窗里点「安装」，再回到主屏幕看进度"
+            openURL(url) { accepted in
+                if !accepted {
+                    toast = useTrollStore ? "打不开 TrollStore：请确认已安装 TrollStore（2.0 以上）" : "系统没有接受安装链接"
+                }
+            }
+        } catch {
+            toast = error.localizedDescription
+        }
+        working = false
     }
 }
 
