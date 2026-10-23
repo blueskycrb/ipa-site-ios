@@ -5,7 +5,7 @@ struct SettingsView: View {
     @AppStorage(Keys.sitePassword) private var sitePassword = ""
     @AppStorage(Keys.autoPurchase) private var autoPurchase = true
     @AppStorage(Keys.country) private var country = "cn"
-    @AppStorage(Keys.installMode) private var installMode = "trollstore"
+    @AppStorage(Keys.installMode) private var installMode = "system"
     @ObservedObject private var updater = Updater.shared
     @Environment(\.openURL) private var openURL
     @State private var status: ServerStatus?
@@ -78,8 +78,8 @@ struct SettingsView: View {
 
                 Section {
                     Picker("安装方式", selection: $installMode) {
-                        Text("TrollStore").tag("trollstore")
                         Text("系统安装").tag("system")
+                        Text("TrollStore").tag("trollstore")
                     }
                     .pickerStyle(.segmented)
                     if installMode == "system" {
@@ -94,8 +94,8 @@ struct SettingsView: View {
                     Text("安装")
                 } footer: {
                     Text(installMode == "trollstore"
-                         ? "点「TrollStore 安装」会把下载链接交给 TrollStore（需 2.0 以上），它自己下载并安装，任何 IPA 都行，不用先存到手机。"
-                         : "系统安装只对本站从 App Store 下载的 IPA 有效，装好后打开时可能需要手机登录同一个 Apple ID。点「安装」后回到主屏幕查看进度。")
+                         ? "可选：点「TrollStore 安装」会把下载链接交给 TrollStore（需 2.0 以上），任何 IPA 都能装，包括 Alist 里的改版 IPA。"
+                         : "系统安装（默认）：用 iOS 官方的安装方式，只对本站从 App Store 下载的 IPA 有效，装好后打开时可能需要手机登录同一个 Apple ID。点「安装」后回到主屏幕查看进度。")
                 }
 
                 Section {

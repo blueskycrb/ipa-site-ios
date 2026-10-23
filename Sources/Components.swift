@@ -22,7 +22,7 @@ struct InstallButton: View {
     let name: String
     let systemAvailable: Bool
     @Binding var toast: String?
-    @AppStorage(Keys.installMode) private var mode = "trollstore"
+    @AppStorage(Keys.installMode) private var mode = "system"
     @Environment(\.openURL) private var openURL
     @State private var working = false
 
