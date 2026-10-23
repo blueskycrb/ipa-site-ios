@@ -9,7 +9,7 @@ enum Keys {
     static let country = "country"
     static let platform = "platform"
     static let installMode = "installMode"   // "trollstore" 或 "system"
-    static let defaultServer = "http://192.168.10.136:8686"
+    static let defaultServer = ""   // 首次使用在「设置」里填写
 }
 
 struct APIError: LocalizedError {
@@ -157,6 +157,7 @@ enum API {
     }
 
     static func url(_ path: String, _ query: [String: String] = [:]) throws -> URL {
+        if base.isEmpty { throw APIError(message: "请先在「设置」里填写服务器地址") }
         guard var comps = URLComponents(string: base + path) else {
             throw APIError(message: "服务器地址无效：\(base)")
         }

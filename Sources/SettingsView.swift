@@ -22,7 +22,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("例如 http://192.168.10.136:8686", text: $server)
+                    TextField("服务器地址，例如 http://192.168.1.10:8686", text: $server)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
