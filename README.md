@@ -34,7 +34,7 @@ apple-magnifier://install?url=https%3A%2F%2Fgithub.com%2Fblueskycrb%2Fipa-site-i
 - **AltStore**：装好 AltServer 后可以在手机上自动续签。
 - **TrollStore**（支持的 iOS 版本才能用）：直接安装，永久有效。
 
-首次打开 App：在「设置」里确认服务器地址（默认 `http://192.168.10.136:8686`），iOS 会询问是否允许访问本地网络，选「允许」。
+首次打开 App：在「设置」里确认服务器地址（默认 `http://ip:8686`），iOS 会询问是否允许访问本地网络，选「允许」。
 
 ## 本地开发
 
