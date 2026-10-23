@@ -96,10 +96,10 @@ struct VersionsView: View {
                 Section {
                     Text("最新的 \(autoCount) 个版本会自动显示版本号，其余点「查看」。在上方输入版本号（如 14.8.40、14.8）或日期（如 2026-09）后回车，可以直接找到对应版本。")
                         .font(.caption).foregroundColor(.secondary)
-                    if let findStatus {
+                    if let status = findStatus {
                         HStack(spacing: 8) {
                             if findTask != nil { ProgressView().controlSize(.small) }
-                            Text(findStatus).font(.caption)
+                            Text(status).font(.caption)
                             Spacer()
                             if findTask != nil {
                                 Button("取消") { cancelFind() }.font(.caption)
