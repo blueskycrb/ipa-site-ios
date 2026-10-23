@@ -6,6 +6,8 @@ struct SettingsView: View {
     @AppStorage(Keys.autoPurchase) private var autoPurchase = true
     @AppStorage(Keys.country) private var country = "cn"
     @AppStorage(Keys.installMode) private var installMode = "trollstore"
+    @ObservedObject private var updater = Updater.shared
+    @Environment(\.openURL) private var openURL
     @State private var status: ServerStatus?
     @State private var statusError: String?
     @State private var checking = false
@@ -94,6 +96,35 @@ struct SettingsView: View {
                     Text(installMode == "trollstore"
                          ? "点「TrollStore 安装」会把下载链接交给 TrollStore（需 2.0 以上），它自己下载并安装，任何 IPA 都行，不用先存到手机。"
                          : "系统安装只对本站从 App Store 下载的 IPA 有效，装好后打开时可能需要手机登录同一个 Apple ID。点「安装」后回到主屏幕查看进度。")
+                }
+
+                Section {
+                    LabeledContent("当前版本", value: "\(updater.currentVersion)（\(updater.currentBuild)）")
+                    if let r = updater.latest {
+                        if updater.hasUpdate {
+                            LabeledContent("最新版本", value: "\(r.version)（\(r.build)）")
+                            if !r.notes.isEmpty {
+                                Text(r.notes).font(.caption).foregroundColor(.secondary).lineLimit(6)
+                            }
+                            Button("用 TrollStore 安装最新版") {
+                                if let url = updater.trollStoreURL { openURL(url) }
+                            }
+                            Link("在浏览器打开下载页", destination: r.pageURL)
+                        } else {
+                            Text("已是最新版本").foregroundColor(.green)
+                        }
+                    }
+                    Button(updater.checking ? "检查中…" : "检查更新") {
+                        Task { await updater.check() }
+                    }
+                    .disabled(updater.checking)
+                    if let e = updater.error {
+                        Text(e).font(.caption).foregroundColor(.red)
+                    }
+                } header: {
+                    Text("关于")
+                } footer: {
+                    Text("新版本从 GitHub（\(Updater.repo)）的 Release 下载，交给 TrollStore 安装，设置和已存的文件都会保留。")
                 }
 
                 if let a = status?.alist, a.enabled {

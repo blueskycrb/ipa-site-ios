@@ -12,12 +12,19 @@ App 本身不运行 ipatool：搜索、下载、上传 Alist 都由服务器完�
 
 ## 获取 IPA
 
-每次推送到 `main`，GitHub Actions 会在 macOS 上编译出**未签名**的 IPA：
+每次推送到 `main`，GitHub Actions 会在 macOS 上编译出**未签名**的 IPA，并发布到 [Releases](https://github.com/blueskycrb/ipa-site-ios/releases)。最新版的固定下载地址：
 
-1. 打开仓库的 **Actions** 页面，点最新一次成功的 “Build unsigned IPA”
-2. 在页面底部 **Artifacts** 里下载 `IPASite-unsigned`（是个 zip，里面是 `IPASite-unsigned.ipa`）
+```
+https://github.com/blueskycrb/ipa-site-ios/releases/latest/download/IPASite.ipa
+```
 
-也可以在 Actions 页面点 **Run workflow** 手动编译。
+装了 TrollStore 的话，在 Safari 地址栏打开下面这个链接就能直接安装最新版：
+
+```
+apple-magnifier://install?url=https%3A%2F%2Fgithub.com%2Fblueskycrb%2Fipa-site-ios%2Freleases%2Flatest%2Fdownload%2FIPASite.ipa
+```
+
+装好之后，App 启动时会自动检查更新，有新版会提示用 TrollStore 安装；也可以在「设置 → 关于」里手动检查。
 
 ## 安装到 iPhone
 

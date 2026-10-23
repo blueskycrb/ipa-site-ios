@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write   # 发布 GitHub Release
+
 jobs:
   build:
     runs-on: macos-15
@@ -17,6 +20,7 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      # 编译号用 Actions 的运行序号，每次编译都会变大，App 内「检查更新」靠它判断有没有新版
       - name: Build (no code signing)
         run: |
           xcodebuild \
@@ -27,6 +31,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             -quiet \
             build
 
@@ -37,10 +42,28 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/IPASite.app Payload/
-          zip -qry IPASite-unsigned.ipa Payload
-          ls -lh IPASite-unsigned.ipa
+          zip -qry IPASite.ipa Payload
+          ls -lh IPASite.ipa
 
       - uses: actions/upload-artifact@v4
         with:
           name: IPASite-unsigned
-          path: IPASite-unsigned.ipa
+          path: IPASite.ipa
+
+      # 每次编译发布一个 Release；最新版的固定下载地址：
+      # https://github.com/blueskycrb/ipa-site-ios/releases/latest/download/IPASite.ipa
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PLIST=build/Build/Products/Release-iphoneos/IPASite.app/Info.plist
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
+          TAG="v${VERSION}-b${BUILD}"
+          git log -1 --pretty=%B > notes.txt
+          gh release create "$TAG" IPASite.ipa \
+            --target "$GITHUB_SHA" \
+            --title "IPA 下载 ${VERSION} (${BUILD})" \
+            --notes-file notes.txt \
+            --latest
