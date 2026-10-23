@@ -73,6 +73,21 @@ struct SettingsView: View {
                         .autocorrectionDisabled()
                 }
 
+                if let s = status {
+                    Section {
+                        if s.install?.enabled == true {
+                            LabeledContent("已启用", value: s.install?.publicURL ?? "")
+                        } else {
+                            Text("未启用：需要先给网站配好 https 地址（例如 Lucky 反代 + 证书），再在服务器 .env 里设置 IPA_PUBLIC_URL。")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                    } header: {
+                        Text("直接安装")
+                    } footer: {
+                        Text("App Store 下载的 IPA 是按下载它的 Apple ID 授权的，装好后打开时可能需要手机登录同一个 Apple ID。点「安装」后回到主屏幕查看进度。")
+                    }
+                }
+
                 if let a = status?.alist, a.enabled {
                     Section("Alist") {
                         LabeledContent("上传目录", value: a.dir ?? "/")

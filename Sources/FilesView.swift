@@ -4,6 +4,7 @@ struct FilesView: View {
     @ObservedObject private var phone = PhoneDownloads.shared
     @State private var files: [RemoteFile] = []
     @State private var alist: AlistInfo?
+    @State private var install: InstallInfo?
     @State private var message: String?
     @State private var toast: String?
     @State private var confirmDelete: RemoteFile?
@@ -51,7 +52,9 @@ struct FilesView: View {
             .refreshable { await refresh() }
             .task {
                 phone.refresh()
-                alist = (try? await API.status())?.alist
+                let status = try? await API.status()
+                alist = status?.alist
+                install = status?.install
                 while !Task.isCancelled {
                     await refresh()
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -96,14 +99,16 @@ struct FilesView: View {
                 alistLine(up)
             }
             if let item = phone.active[file.name] {
-                phoneLine(item)
+                PhoneProgressLine(item: item)
             }
             HStack {
-                Button("存到手机") { phone.start(file.name) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(phone.isRunning(file.name))
+                SaveToPhoneButton(name: file.name, alistAvailable: alist?.enabled == true && file.alist?.status != "error",
+                                  phone: phone, toast: $toast)
+                if install?.enabled == true && file.app?.bundleID != nil {
+                    InstallButton(name: file.name, toast: $toast)
+                }
                 if alist?.enabled == true {
-                    Button(file.alist?.status == "done" ? "重传 Alist" : "传到 Alist") {
+                    Button(file.alist?.status == "done" ? "重传" : "传到 Alist") {
                         Task { await upload(file) }
                     }
                     .buttonStyle(.bordered)
@@ -137,21 +142,6 @@ struct FilesView: View {
             Text("Alist：已上传到 \(up.remote ?? "")").font(.caption).foregroundColor(.green).lineLimit(1)
         default:
             Text("Alist 上传失败：\(up.error ?? "")").font(.caption).foregroundColor(.red)
-        }
-    }
-
-    @ViewBuilder
-    private func phoneLine(_ item: PhoneDownloads.Item) -> some View {
-        if let err = item.error {
-            Text("存到手机失败：\(err)").font(.caption).foregroundColor(.red)
-        } else if item.done {
-            Text("已存到手机").font(.caption).foregroundColor(.green)
-        } else {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("正在存到手机 \(fmtSize(Double(item.received))) / \(fmtSize(Double(item.total)))")
-                    .font(.caption).foregroundColor(.accentColor)
-                ProgressView(value: item.total > 0 ? Double(item.received) / Double(item.total) : 0)
-            }
         }
     }
 

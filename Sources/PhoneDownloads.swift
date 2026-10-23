@@ -9,6 +9,7 @@ final class PhoneDownloads: NSObject, ObservableObject {
         var total: Int64 = 0
         var error: String?
         var done = false
+        var viaAlist = false
     }
 
     @Published var active: [String: Item] = [:]
@@ -40,14 +41,20 @@ final class PhoneDownloads: NSObject, ObservableObject {
         return !item.done && item.error == nil
     }
 
-    func start(_ name: String) {
+    /// remote 为空时从服务器下载；传入网盘直链时直接从网盘下载
+    func start(_ name: String, from remote: URL? = nil) {
         guard !isRunning(name) else { return }
         do {
-            var req = URLRequest(url: try API.fileURL(name))
-            API.authorize(&req)
+            var req: URLRequest
+            if let remote {
+                req = URLRequest(url: remote)   // 直链自带签名，不能再加网站密码的认证头
+            } else {
+                req = URLRequest(url: try API.fileURL(name))
+                API.authorize(&req)
+            }
             let task = session.downloadTask(with: req)
             names[task.taskIdentifier] = name
-            active[name] = Item()
+            active[name] = Item(viaAlist: remote != nil)
             task.resume()
         } catch {
             active[name] = Item(error: error.localizedDescription)

@@ -29,12 +29,18 @@ struct AlistInfo: Decodable {
     let auto: Bool?
 }
 
+struct InstallInfo: Decodable {
+    let enabled: Bool
+    let publicURL: String?
+}
+
 struct ServerStatus: Decodable {
     let ok: Bool
     let ipatool: String?
     let version: String?
     let account: Account?
     let alist: AlistInfo?
+    let install: InstallInfo?
 }
 
 struct AppItem: Decodable, Identifiable, Hashable {
@@ -117,6 +123,22 @@ struct VersionMeta: Decodable {
     let releaseDate: String?
 }
 
+struct AlistItem: Decodable, Identifiable {
+    let name: String
+    let size: Double?
+    let modified: String?
+    let app: FileApp?
+    var id: String { name }
+}
+
+struct AlistPage: Decodable {
+    let total: Int
+    let items: [AlistItem]
+    let dir: String?
+}
+
+private struct LinkResponse: Decodable { let url: String?; let size: Double? }
+private struct InstallResponse: Decodable { let ok: Bool; let url: String?; let source: String?; let error: String? }
 private struct SearchResponse: Decodable { let apps: [AppItem]? }
 private struct VersionsResponse: Decodable { let versions: [String]? }
 private struct JobsResponse: Decodable { let jobs: [Job]? }
@@ -253,6 +275,32 @@ enum API {
 
     static func fileURL(_ name: String) throws -> URL {
         try url("/files/" + encode(name))
+    }
+
+    static func alistList(query: String, offset: Int, limit: Int = 50, refresh: Bool = false) async throws -> AlistPage {
+        var q = ["q": query, "offset": String(offset), "limit": String(limit)]
+        if refresh { q["refresh"] = "1" }
+        // 刷新时 Alist 要重新读网盘目录，几千个文件可能要半分钟以上
+        return try await send(AlistPage.self, request("/api/alist/list", query: q, timeout: refresh ? 180 : 90))
+    }
+
+    /// 网盘直链（有时效），手机直接从网盘下载，不经过家里的上行带宽
+    static func alistLink(_ name: String) async throws -> URL {
+        let r = try await send(LinkResponse.self, request("/api/alist/link", query: ["name": name], timeout: 60))
+        guard let s = r.url, let u = URL(string: s) ?? URL(string: s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "") else {
+            throw APIError(message: "Alist 没有返回可用的下载链接")
+        }
+        return u
+    }
+
+    /// 返回 itms-services:// 安装链接；source 为 auto / server / alist
+    static func installURL(_ name: String, source: String = "auto") async throws -> (URL, String) {
+        let r = try await send(InstallResponse.self, request("/api/install", query: ["name": name, "source": source], timeout: 60),
+                               allowNotOK: true)
+        guard r.ok, let s = r.url, let u = URL(string: s) else {
+            throw APIError(message: r.error ?? "生成安装链接失败")
+        }
+        return (u, r.source ?? source)
     }
 
     private static func encode(_ name: String) -> String {

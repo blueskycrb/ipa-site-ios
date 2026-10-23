@@ -11,6 +11,8 @@ struct IPASiteApp: App {
                     .tabItem { Label("任务", systemImage: "arrow.down.circle") }
                 FilesView()
                     .tabItem { Label("文件", systemImage: "folder") }
+                AlistView()
+                    .tabItem { Label("Alist", systemImage: "cloud") }
                 SettingsView()
                     .tabItem { Label("设置", systemImage: "gearshape") }
             }
