@@ -1309,6 +1309,14 @@ def signed_path_of(key):
     return p
 
 
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def ipa_info(path):
     """读出 IPA 主程序的 Bundle ID、版本、名称。"""
     with zipfile.ZipFile(path) as z:
@@ -1614,6 +1622,63 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error_json("Not found", 404)
         except IpatoolError as e:
             self.send_error_json(str(e), 500)
+
+    def do_PUT(self):
+        if not self.authorized():
+            return
+        url = urllib.parse.urlparse(self.path)
+        try:
+            if url.path == "/api/upload":
+                return self.api_upload(urllib.parse.parse_qs(url.query).get("name", [""])[0])
+            self.send_error_json("Not found", 404)
+        except IpatoolError as e:
+            self.send_error_json(str(e), 400)
+
+    def api_upload(self, name):
+        """从手机 / 浏览器上传 IPA（请求体就是文件内容），存到服务器文件里，之后可以签名、安装。"""
+        size = int(self.headers.get("Content-Length") or 0)
+        base = safe_name_part(name.rsplit(".", 1)[0], 80)
+        if not re.search(r"\.t?ipa$", name, re.I) or not base:
+            raise IpatoolError("只能上传 .ipa / .tipa 文件")
+        if not size:
+            raise IpatoolError("文件是空的")
+        if size > 8 * 1024 ** 3:
+            raise IpatoolError("文件太大了（超过 8 GB）")
+        DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = DOWNLOAD_DIR / f".upload-{uuid.uuid4().hex[:8]}.part"
+        try:
+            digest, left = hashlib.sha256(), size
+            with open(tmp, "wb") as f:
+                while left:
+                    chunk = self.rfile.read(min(left, 1 << 20))
+                    if not chunk:
+                        raise IpatoolError("上传中断了，请重试")
+                    f.write(chunk)
+                    digest.update(chunk)
+                    left -= len(chunk)
+            try:
+                info = ipa_info(tmp)
+            except zipfile.BadZipFile:
+                raise IpatoolError("不是有效的 IPA 文件")
+            with meta_lock:
+                # 同名文件内容一样就直接用它，不一样就加序号
+                target, n = f"{base}.ipa", 1
+                while (DOWNLOAD_DIR / target).exists():
+                    existing = DOWNLOAD_DIR / target
+                    if existing.stat().st_size == size and _sha256_file(existing) == digest.hexdigest():
+                        tmp.unlink()
+                        break
+                    n += 1
+                    target = f"{base}_{n}.ipa"
+                else:
+                    os.replace(tmp, DOWNLOAD_DIR / target)
+                    meta = load_meta()
+                    # 不记 bundleID：传上来的不是本站从 App Store 下载的，不能「系统安装」，要签名或 TrollStore 安装
+                    meta[target] = {"name": info["appName"], "version": info["version"], "uploaded": True}
+                    save_meta(meta)
+        finally:
+            tmp.unlink(missing_ok=True)
+        self.send_json({"ok": True, "name": target, "app": load_meta().get(target)})
 
     def do_DELETE(self):
         if not self.authorized():

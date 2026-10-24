@@ -41,7 +41,9 @@
       <div class="toolbar">
         <input type="search" id="q" placeholder="搜索文件名（回车）">
         <label class="small muted">用证书 <select id="certSel"></select></label>
+        <label class="btn sm" id="ipaUploadBtn">上传 IPA<input type="file" id="ipaFile" accept=".ipa,.tipa" hidden></label>
       </div>
+      <div id="ipaUploadMsg" class="small" style="padding:0 12px 8px" hidden></div>
       <div class="list" id="appList"><div class="empty">加载中…</div></div>
       <div id="more" style="padding:8px 12px" hidden><button class="btn sm" id="moreBtn">加载更多</button></div>
     </div>
@@ -210,6 +212,25 @@ async function loadApps(reset) {
   $("#more").hidden = items.length >= total;
   $("#moreBtn").textContent = `加载更多（还有 ${total - items.length} 个）`;
 }
+// 从电脑 / 手机上传 IPA 到服务器文件，传完切到「服务器文件」，点「签名」即可
+$("#ipaFile").onchange = () => {
+  const file = $("#ipaFile").files[0]; if (!file) return;
+  const msg = $("#ipaUploadMsg");
+  msg.hidden = false; msg.className = "small muted"; msg.textContent = `上传 ${file.name}：0%`;
+  const xhr = new XMLHttpRequest();
+  xhr.open("PUT", "/api/upload?name=" + encodeURIComponent(file.name));
+  xhr.upload.onprogress = e => { if (e.lengthComputable) msg.textContent = `上传 ${file.name}：${(e.loaded / e.total * 100).toFixed(0)}%（${fmtSize(e.loaded)} / ${fmtSize(e.total)}）`; };
+  xhr.onload = () => {
+    let r = {}; try { r = JSON.parse(xhr.responseText); } catch {}
+    $("#ipaFile").value = "";
+    if (xhr.status !== 200 || !r.ok) { msg.className = "small err"; msg.textContent = `上传失败：${r.error || "HTTP " + xhr.status}`; return; }
+    msg.className = "small"; msg.textContent = `已上传为 ${r.name}，在下面点「签名」`;
+    document.querySelectorAll("[data-tab]").forEach(x => x.classList.toggle("active", x.dataset.tab === "server"));
+    tab = "server"; $("#q").value = r.name; loadApps(true);
+  };
+  xhr.onerror = () => { msg.className = "small err"; msg.textContent = "上传失败：连接中断"; $("#ipaFile").value = ""; };
+  xhr.send(file);
+};
 $("#q").onkeydown = e => { if (e.key === "Enter") loadApps(true); };
 $("#moreBtn").onclick = () => loadApps(false);
 $("#appList").onclick = async e => {

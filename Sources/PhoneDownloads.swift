@@ -32,8 +32,37 @@ final class PhoneDownloads: NSObject, ObservableObject {
         let urls = (try? FileManager.default.contentsOfDirectory(
             at: Self.folder, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles])) ?? []
         localFiles = urls
-            .filter { ["ipa", "pkg"].contains($0.pathExtension.lowercased()) }
+            .filter { ["ipa", "tipa", "pkg"].contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// 把「文件」App 或其他 App（微信、Safari 下载…）里的 IPA 复制进来，显示在「手机上的文件」里。
+    /// 文件可能很大，在后台线程调用。返回复制后的位置。
+    static func importFile(_ url: URL) throws -> URL {
+        let ext = url.pathExtension.lowercased()
+        guard ext == "ipa" || ext == "tipa" else {
+            throw APIError(message: "\(url.lastPathComponent) 不是 IPA 文件")
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let fm = FileManager.default
+        if url.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
+            return url   // 本来就在这里
+        }
+        let stem = url.deletingPathExtension().lastPathComponent
+        var dest = folder.appendingPathComponent(url.lastPathComponent)
+        var n = 1
+        while fm.fileExists(atPath: dest.path) {
+            n += 1
+            dest = folder.appendingPathComponent("\(stem)_\(n).\(url.pathExtension)")
+        }
+        // 别的 App「用其他应用打开」时，系统先把文件放在 Documents/Inbox，搬出来就行
+        if url.path.contains("/Documents/Inbox/") {
+            try fm.moveItem(at: url, to: dest)
+        } else {
+            try fm.copyItem(at: url, to: dest)
+        }
+        return dest
     }
 
     func isRunning(_ name: String) -> Bool {

@@ -6,7 +6,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.9.0"
+    MARKETING_VERSION: "1.10.0"
     # 编译号在 GitHub Actions 里用运行序号覆盖；本地编译时为 0
     CURRENT_PROJECT_VERSION: "0"
 targets:
@@ -39,6 +39,28 @@ targets:
         # 让存到手机的 IPA 出现在「文件」App 里
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # 在微信、Safari、「文件」等 App 里可以把 IPA「用其他应用打开 → IPA 下载」，导入后签名安装
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: iOS App
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.apple.itunes.ipa
+              - com.opa334.trollstore.tipa
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.apple.itunes.ipa
+            UTTypeDescription: iOS App
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - ipa
+          - UTTypeIdentifier: com.opa334.trollstore.tipa
+            UTTypeDescription: TrollStore App
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - tipa
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.blueskycrb.ipasite

@@ -59,10 +59,12 @@ struct InstallButton: View {
 }
 
 /// 「证书签名」：用服务器上保存的 p12 证书重签这个 IPA，签好后自动弹出安装。
-/// 证书在网页「证书签名」页上传；有多个证书时先选一个。
+/// 证书在「设置 → 证书管理」导入；有多个证书时先选一个。手机上的文件（localFile）先传到服务器再签。
 struct SignButton: View {
     let name: String
-    let source: String   // "alist" 或 "server"
+    let source: String   // "alist"、"server" 或 "phone"（手机上的文件）
+    var localFile: URL? = nil
+    var onDone: (() async -> Void)? = nil
     @Binding var toast: String?
     @AppStorage(Keys.installMode) private var mode = "system"
     @Environment(\.openURL) private var openURL
@@ -110,7 +112,17 @@ struct SignButton: View {
     private func run(_ cert: String) async {
         progress = "排队中…"
         do {
-            let job = try await API.sign(source: source, name: name, cert: cert)
+            var src = source
+            var file = name
+            if let localFile {
+                progress = "上传 0%"
+                file = try await API.uploadIPA(localFile) { p in
+                    DispatchQueue.main.async { progress = "上传 \(Int(p * 100))%" }
+                }
+                src = "server"
+                progress = "排队中…"
+            }
+            let job = try await API.sign(source: src, name: file, cert: cert)
             let j = try await waitForSignJob(job.id) { progress = $0 }
             progress = nil
             let link = (mode == "trollstore" ? j.trollstoreURL : nil) ?? j.installURL ?? j.trollstoreURL
@@ -118,6 +130,7 @@ struct SignButton: View {
                 toast = "签名完成：\(j.appName ?? name)，在弹窗里点「安装」"
                 openURL(url)
             }
+            await onDone?()
         } catch {
             progress = nil
             toast = error.localizedDescription

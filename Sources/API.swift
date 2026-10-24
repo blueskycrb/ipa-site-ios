@@ -196,6 +196,23 @@ struct SignedItem: Decodable, Identifiable {
 }
 
 private struct SignedResponse: Decodable { let items: [SignedItem] }
+private struct UploadResponse: Decodable { let ok: Bool?; let error: String?; let name: String? }
+
+/// 上传进度：URLSession 在后台线程回调
+final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate {
+    let onProgress: (Double) -> Void
+
+    init(_ onProgress: @escaping (Double) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        if totalBytesExpectedToSend > 0 {
+            onProgress(Double(totalBytesSent) / Double(totalBytesExpectedToSend))
+        }
+    }
+}
 
 struct CertsResponse: Decodable {
     let zsign: Bool?
@@ -458,6 +475,28 @@ enum API {
 
     static func deleteSigned(_ key: String) async throws {
         _ = try await send(Envelope.self, request("/api/signed/" + encode(key), method: "DELETE"))
+    }
+
+    /// 把手机上的 IPA 传到服务器文件里（之后可以签名），返回服务器上的文件名；progress 在后台线程回调 0~1
+    static func uploadIPA(_ file: URL, progress: @escaping (Double) -> Void) async throws -> String {
+        var req = try request("/api/upload", query: ["name": file.lastPathComponent], method: "PUT", timeout: 600)
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await URLSession.shared.upload(for: req, fromFile: file,
+                                                               delegate: UploadProgressDelegate(progress))
+        } catch {
+            throw APIError(message: "上传到服务器失败：\(error.localizedDescription)")
+        }
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 { throw APIError(message: "网站需要访问密码，请在「设置」里填写") }
+        let r = try? JSONDecoder().decode(UploadResponse.self, from: data)
+        guard r?.ok == true, let name = r?.name else {
+            if r?.error == "Not found" { throw APIError(message: "服务器版本太旧，不支持上传 IPA，请先更新服务器") }
+            throw APIError(message: r?.error ?? "上传失败（HTTP \(code)）")
+        }
+        return name
     }
 
     /// 返回安装链接：mode 为 trollstore 时是 apple-magnifier://install?url=…，否则是 itms-services://

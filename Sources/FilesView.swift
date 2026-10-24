@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct FilesView: View {
     @ObservedObject private var phone = PhoneDownloads.shared
@@ -10,6 +11,7 @@ struct FilesView: View {
     @State private var confirmDelete: RemoteFile?
     @State private var signed: [SignedItem] = []
     @State private var certs: [CertInfo] = []
+    @State private var importing = false
 
     var body: some View {
         NavigationStack {
@@ -28,6 +30,9 @@ struct FilesView: View {
                         Text("证书过期后点「换证书重签」：新证书和原来的是同一个团队时，直接覆盖安装，App 数据保留；不是同一个团队要先删除手机上的旧 App。左滑删除。")
                     }
                 }
+                if !phone.localFiles.isEmpty {
+                    phoneSection   // 有文件时放在服务器文件前面，导入后不用往下翻
+                }
                 Section("服务器上的文件") {
                     if let message {
                         Text(message).foregroundColor(.red)
@@ -39,32 +44,21 @@ struct FilesView: View {
                         remoteRow(file)
                     }
                 }
-                Section {
-                    if phone.localFiles.isEmpty {
-                        Text("还没有存到手机的 IPA").foregroundColor(.secondary)
-                    }
-                    ForEach(phone.localFiles, id: \.self) { url in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(url.lastPathComponent).font(.subheadline).lineLimit(2)
-                                Text(fmtSize(PhoneDownloads.size(of: url))).font(.caption).foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            ShareLink(item: url) {
-                                Image(systemName: "square.and.arrow.up")
-                            }
-                        }
-                        .swipeActions {
-                            Button("删除", role: .destructive) { phone.delete(url) }
-                        }
-                    }
-                } header: {
-                    Text("手机上的文件")
-                } footer: {
-                    Text("也可以在「文件」App →「我的 iPhone」→「IPA 下载」里找到。点分享按钮可以发送给 TrollStore 等工具安装。左滑删除。")
+                if phone.localFiles.isEmpty {
+                    phoneSection
                 }
             }
             .navigationTitle("文件")
+            .toolbar {
+                Button {
+                    importing = true
+                } label: {
+                    Label("导入 IPA", systemImage: "square.and.arrow.down")
+                }
+            }
+            .fileImporter(isPresented: $importing, allowedContentTypes: [.data], allowsMultipleSelection: true) { result in
+                Task { await importPicked(result) }
+            }
             .refreshable {
                 await refresh()
                 await loadSigned()
@@ -90,6 +84,62 @@ struct FilesView: View {
                 }
             }
             .overlay(alignment: .bottom) { ToastView(text: $toast) }
+        }
+    }
+
+    private var phoneSection: some View {
+        Section {
+            if phone.localFiles.isEmpty {
+                Text("还没有手机上的 IPA，点右上角「导入 IPA」").foregroundColor(.secondary)
+            }
+            ForEach(phone.localFiles, id: \.self) { url in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(url.lastPathComponent).font(.subheadline).lineLimit(2)
+                    Text(fmtSize(PhoneDownloads.size(of: url))).font(.caption).foregroundColor(.secondary)
+                    HStack {
+                        SignButton(name: url.lastPathComponent, source: "phone", localFile: url,
+                                   onDone: { await loadSigned() }, toast: $toast)
+                        Spacer()
+                        ShareLink(item: url) {
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.vertical, 2)
+                .swipeActions {
+                    Button("删除", role: .destructive) { phone.delete(url) }
+                }
+            }
+        } header: {
+            Text("手机上的文件")
+        } footer: {
+            Text("右上角「导入 IPA」可以从「文件」App 选；在微信、Safari 等 App 里也可以「用其他应用打开 → IPA 下载」。点「证书签名」会先传到服务器，签好后弹出安装。也可以在「文件」App →「我的 iPhone」→「IPA 下载」里找到。左滑删除。")
+        }
+    }
+
+    private func importPicked(_ result: Result<[URL], Error>) async {
+        do {
+            let urls = try result.get()
+            var count = 0
+            var skipped: [String] = []
+            for url in urls {
+                do {
+                    _ = try await Task.detached { try PhoneDownloads.importFile(url) }.value
+                    count += 1
+                } catch {
+                    skipped.append(url.lastPathComponent)
+                }
+            }
+            phone.refresh()
+            if count > 0 {
+                toast = "已导入 \(count) 个，点「证书签名」签名安装" + (skipped.isEmpty ? "" : "（\(skipped.count) 个不是 IPA，已跳过）")
+            } else {
+                toast = "没有导入：请选择 .ipa 或 .tipa 文件"
+            }
+        } catch {
+            toast = "导入失败：\(error.localizedDescription)"
         }
     }
 
