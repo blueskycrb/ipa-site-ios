@@ -51,7 +51,7 @@ struct CertsView: View {
             } header: {
                 Text("服务器上的证书")
             } footer: {
-                Text("左滑删除。删除证书时，用它签好的文件也会一起删除。")
+                Text("左滑删除。用它签好的 App 会保留，可以在「文件」页换新证书重签。")
             }
 
             Section {
@@ -88,12 +88,12 @@ struct CertsView: View {
                             presenting: deleting) { c in
             Button("删除 \(c.label ?? c.cn ?? c.id)", role: .destructive) { Task { await delete([c]) } }
         } message: { _ in
-            Text("用这个证书签好的文件也会一起删除。")
+            Text("用它签好的 App 会保留，可以在「文件」页换新证书重签。")
         }
         .confirmationDialog("删除所有过期证书？", isPresented: $confirmDeleteExpired, titleVisibility: .visible) {
             Button("删除 \(expired.count) 个", role: .destructive) { Task { await delete(expired) } }
         } message: {
-            Text("用这些证书签好的文件也会一起删除。")
+            Text("用它们签好的 App 会保留，可以在「文件」页换新证书重签。")
         }
     }
 

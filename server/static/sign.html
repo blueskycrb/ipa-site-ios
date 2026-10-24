@@ -168,7 +168,7 @@ $("#uploadForm").onsubmit = async e => {
 };
 $("#certs").onclick = async e => {
   const b = e.target.closest("[data-delcert]"); if (!b) return;
-  if (!confirm("删除这个证书？用它签好的文件也会一起删除。")) return;
+  if (!confirm("删除这个证书？用它签好的文件会保留，可以在「已签名文件」里换新证书重签。")) return;
   const r = await api("/api/certs/" + b.dataset.delcert, { method: "DELETE" });
   toast(r.ok ? "已删除" : r.error); loadCerts(); loadSigned();
 };
@@ -256,17 +256,35 @@ $("#clearJobs").onclick = async () => { await api("/api/sign/clear", { body: {} 
 async function loadSigned() {
   const r = await api("/api/signed");
   if (!r.ok) return;
-  $("#signed").innerHTML = r.items.length ? r.items.map(s => `
-    <div class="row">
+  const now = Date.now() / 1000;
+  $("#signed").innerHTML = r.items.length ? r.items.map(s => {
+    const dead = s.certDeleted || (s.certExpires && s.certExpires < now);
+    return `<div class="row">
       ${s.icon ? `<img src="${esc(s.icon)}" alt="">` : ""}
       <div class="grow">
         <div class="ellip">${esc(s.appName || s.sourceName)} <span class="muted small">${esc(s.version || "")}</span></div>
-        <div class="small muted ellip">${esc(s.bundleID || "")} · ${fmtSize(s.size)} · ${esc(s.certLabel || "")}</div>
-        <div class="actions">${linkButtons(s)}<button class="btn sm danger" data-delsigned="${esc(s.key)}">删除</button></div>
+        <div class="small muted ellip">${esc(s.bundleID || "")} · ${fmtSize(s.size)} · ${esc(s.certLabel || "证书已删除")}${s.certExpires ? ` · 到 ${fmtDate(s.certExpires)}` : ""}</div>
+        ${dead ? `<div class="small err">证书${s.certDeleted ? "已删除" : "已过期"}，装不上了：在上面「用证书」选新证书，点「换证书重签」</div>` : ""}
+        <div class="actions">${dead ? "" : linkButtons(s)}
+          <button class="btn sm" data-resign="${esc(s.key)}" data-team="${esc(s.teamID || "")}">换证书重签</button>
+          <button class="btn sm danger" data-delsigned="${esc(s.key)}">删除</button></div>
       </div>
-    </div>`).join("") : `<div class="empty">暂无</div>`;
+    </div>`;
+  }).join("") : `<div class="empty">暂无</div>`;
 }
 $("#signed").onclick = async e => {
+  const rs = e.target.closest("[data-resign]");
+  if (rs) {
+    const c = certs.find(x => x.id === $("#certSel").value);
+    if (!c) return toast("请先上传证书");
+    if (Math.min(c.certExpires || Infinity, c.profileExpires || Infinity) < Date.now() / 1000) return toast(`「${c.label}」也已经过期了，请换一个证书`);
+    if (rs.dataset.team && c.teamID && rs.dataset.team !== c.teamID &&
+        !confirm(`「${c.label}」和原来的证书不是同一个团队，iOS 不允许直接覆盖安装：要先删除手机上的旧 App 再装，App 里的数据会丢。\n\n仍然用它重签？`)) return;
+    const r = await api("/api/signed/resign", { body: { key: rs.dataset.resign, cert: c.id } });
+    if (!r.ok) return toast(r.error);
+    toast(`已加入签名队列：用「${c.label}」重签`);
+    return pollJobs();
+  }
   const b = e.target.closest("[data-delsigned]"); if (!b) return;
   if (!confirm("删除这个签好的文件？")) return;
   const r = await api("/api/signed/" + encodeURIComponent(b.dataset.delsigned), { method: "DELETE" });

@@ -1281,13 +1281,8 @@ def import_cert_files(files, password="", label=""):
 
 
 def delete_cert(cert_id):
+    # 用它签好的文件留着：证书过期删掉后，还能在「已签名」里直接换新证书重签
     shutil.rmtree(_cert_dir(cert_id), ignore_errors=True)
-    shutil.rmtree(SIGNED_DIR / cert_id, ignore_errors=True)
-    with _signed_meta_lock:
-        meta = load_signed_meta()
-        for k in [k for k in meta if k.startswith(cert_id + "/")]:
-            del meta[k]
-        save_signed_meta(meta)
 
 
 def load_signed_meta():
@@ -1327,20 +1322,44 @@ def ipa_info(path):
     raise IpatoolError("IPA 里没找到 Info.plist，可能不是有效的 IPA")
 
 
-def enqueue_sign(source, name, cert_id):
+def enqueue_sign(source, name, cert_id, **extra):
     check_plain_name(name)
     load_cert(cert_id)
-    if source == "server" and not (DOWNLOAD_DIR / name).is_file():
-        raise IpatoolError("服务器上没有这个文件")
-    if source == "alist" and not alist_enabled():
-        raise IpatoolError("还没配置 Alist")
+    if not extra.get("fromSigned"):   # 用签好的文件重签时不需要原文件
+        if source == "server" and not (DOWNLOAD_DIR / name).is_file():
+            raise IpatoolError("服务器上没有这个文件")
+        if source == "alist" and not alist_enabled():
+            raise IpatoolError("还没配置 Alist")
     job = {"id": uuid.uuid4().hex[:10], "status": "queued", "source": source, "name": name, "cert": cert_id,
            "certLabel": load_cert(cert_id).get("label"), "createdAt": time.time(),
-           "downloaded": 0, "size": 0, "error": None, "key": None}
+           "downloaded": 0, "size": 0, "error": None, "key": None, **extra}
     with sign_jobs_lock:
         sign_jobs[job["id"]] = job
     sign_queue.put(job["id"])
     return job
+
+
+def enqueue_resign(key, cert_id):
+    """换证书重签：直接用签好的文件重签（不用再从网盘取），文件不在了就从原来的来源重新取。"""
+    info = load_signed_meta().get(key)
+    if not info:
+        raise IpatoolError("没有这个签名记录")
+    path = signed_path_of(key)
+    extra = {"replaces": key, "icon": info.get("icon")}
+    if path.is_file():
+        return enqueue_sign(info.get("source") or "server", info.get("sourceName") or path.name, cert_id,
+                            fromSigned=key, **extra)
+    return enqueue_sign(info.get("source"), info.get("sourceName") or "", cert_id, **extra)
+
+
+def cert_expired(cert_id):
+    """证书或描述文件已过期，或者证书已被删除。"""
+    try:
+        c = load_cert(cert_id)
+    except IpatoolError:
+        return True
+    ends = [t for t in (c.get("certExpires"), c.get("profileExpires")) if t]
+    return bool(ends) and min(ends) < time.time()
 
 
 def _fetch_to(url, dest, job):
@@ -1372,7 +1391,9 @@ def run_sign(job):
     work.mkdir(parents=True, exist_ok=True)
     try:
         src = work / "input.ipa"   # zsign 按扩展名识别，.tipa 也统一叫 .ipa
-        if job["source"] == "server":
+        if job.get("fromSigned"):
+            shutil.copyfile(signed_path_of(job["fromSigned"]), src)
+        elif job["source"] == "server":
             shutil.copyfile(DOWNLOAD_DIR / job["name"], src)
         else:
             job["status"] = "downloading"
@@ -1393,11 +1414,16 @@ def run_sign(job):
         info = ipa_info(tmp_out)
         os.replace(tmp_out, out)
         key = f"{job['cert']}/{out_name}"
+        old = job.get("replaces")
         with _signed_meta_lock:
             meta = load_signed_meta()
             meta[key] = {**info, "source": job["source"], "sourceName": job["name"], "signedAt": time.time(),
-                         "cert": job["cert"], "size": out.stat().st_size,
-                         "icon": (load_meta().get(job["name"]) or {}).get("icon")}
+                         "cert": job["cert"], "teamID": cert.get("teamID"), "size": out.stat().st_size,
+                         "icon": (load_meta().get(job["name"]) or {}).get("icon") or job.get("icon")}
+            # 换证书重签后，旧证书已经过期 / 删除的那份没用了，顺手删掉
+            if old and old != key and old in meta and cert_expired(old.partition("/")[0]):
+                signed_path_of(old).unlink(missing_ok=True)
+                del meta[old]
             save_signed_meta(meta)
         job.update(key=key, **info)
         _prune_signed()
@@ -1571,6 +1597,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_import_certs(data)
             if url.path == "/api/sign":
                 job = enqueue_sign(data.get("source") or "alist", data.get("name") or "", data.get("cert") or "")
+                return self.send_json({"ok": True, "job": job})
+            if url.path == "/api/signed/resign":
+                job = enqueue_resign(data.get("key") or "", data.get("cert") or "")
                 return self.send_json({"ok": True, "job": job})
             if url.path == "/api/sign/clear":
                 with sign_jobs_lock:
@@ -1768,7 +1797,11 @@ class Handler(BaseHTTPRequestHandler):
         items = []
         for key, info in load_signed_meta().items():
             if signed_path_of(key).is_file():
-                items.append({"key": key, **info, "certLabel": (certs.get(info.get("cert")) or {}).get("label"),
+                c = certs.get(info.get("cert"))
+                ends = [t for t in ((c or {}).get("certExpires"), (c or {}).get("profileExpires")) if t]
+                items.append({"key": key, **info, "certLabel": c.get("label") if c else None,
+                              "certDeleted": c is None, "certExpires": min(ends) if ends else None,
+                              "teamID": info.get("teamID") or (c or {}).get("teamID"),
                               **signed_links(key, host)})
         items.sort(key=lambda i: i.get("signedAt") or 0, reverse=True)
         self.send_json({"ok": True, "items": items})

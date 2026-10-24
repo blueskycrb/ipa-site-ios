@@ -161,12 +161,41 @@ struct CertInfo: Decodable, Identifiable {
     let matchesProfile: Bool?
     let profileName: String?
     let appID: String?
+    let teamID: String?
 
     /// 证书和描述文件里先到期的那个时间
     var expires: Double? {
         [certExpires, profileExpires].compactMap { $0 }.min()
     }
+
+    var isExpired: Bool { (expires ?? .infinity) < Date().timeIntervalSince1970 }
 }
+
+/// 服务器上用证书签好的 App
+struct SignedItem: Decodable, Identifiable {
+    let key: String
+    let appName: String?
+    let version: String?
+    let bundleID: String?
+    let sourceName: String?
+    let size: Double?
+    let icon: String?
+    let certLabel: String?
+    let certDeleted: Bool?
+    let certExpires: Double?
+    let teamID: String?
+    let installURL: String?
+    let trollstoreURL: String?
+
+    var id: String { key }
+
+    /// 签它的证书已经过期或被删除，装不上了
+    var isDead: Bool {
+        certDeleted == true || (certExpires ?? .infinity) < Date().timeIntervalSince1970
+    }
+}
+
+private struct SignedResponse: Decodable { let items: [SignedItem] }
 
 struct CertsResponse: Decodable {
     let zsign: Bool?
@@ -414,6 +443,21 @@ enum API {
 
     static func signJobs() async throws -> [SignJob] {
         try await send(SignJobsResponse.self, request("/api/sign/jobs")).jobs
+    }
+
+    /// 签好的 App（最新在前）
+    static func signed() async throws -> [SignedItem] {
+        try await send(SignedResponse.self, request("/api/signed")).items
+    }
+
+    /// 换一个证书重签已经签好的 App
+    static func resign(key: String, cert: String) async throws -> SignJob {
+        let body = ["key": key, "cert": cert]
+        return try await send(SignJobResponse.self, request("/api/signed/resign", method: "POST", body: body)).job
+    }
+
+    static func deleteSigned(_ key: String) async throws {
+        _ = try await send(Envelope.self, request("/api/signed/" + encode(key), method: "DELETE"))
     }
 
     /// 返回安装链接：mode 为 trollstore 时是 apple-magnifier://install?url=…，否则是 itms-services://

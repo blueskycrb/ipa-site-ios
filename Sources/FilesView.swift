@@ -8,10 +8,26 @@ struct FilesView: View {
     @State private var message: String?
     @State private var toast: String?
     @State private var confirmDelete: RemoteFile?
+    @State private var signed: [SignedItem] = []
+    @State private var certs: [CertInfo] = []
 
     var body: some View {
         NavigationStack {
             List {
+                if !signed.isEmpty {
+                    Section {
+                        ForEach(signed) { s in
+                            SignedAppRow(item: s, certs: certs, toast: $toast) { await loadSigned() }
+                                .swipeActions {
+                                    Button("删除", role: .destructive) { Task { await deleteSigned(s) } }
+                                }
+                        }
+                    } header: {
+                        Text("证书签名的 App")
+                    } footer: {
+                        Text("证书过期后点「换证书重签」：新证书和原来的是同一个团队时，直接覆盖安装，App 数据保留；不是同一个团队要先删除手机上的旧 App。左滑删除。")
+                    }
+                }
                 Section("服务器上的文件") {
                     if let message {
                         Text(message).foregroundColor(.red)
@@ -49,12 +65,16 @@ struct FilesView: View {
                 }
             }
             .navigationTitle("文件")
-            .refreshable { await refresh() }
+            .refreshable {
+                await refresh()
+                await loadSigned()
+            }
             .task {
                 phone.refresh()
                 let status = try? await API.status()
                 alist = status?.alist
                 install = status?.install
+                await loadSigned()
                 while !Task.isCancelled {
                     await refresh()
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -151,6 +171,21 @@ struct FilesView: View {
         } catch {
             message = error.localizedDescription
         }
+    }
+
+    private func loadSigned() async {
+        signed = (try? await API.signed()) ?? []
+        certs = (try? await API.certs().certs) ?? []
+    }
+
+    private func deleteSigned(_ s: SignedItem) async {
+        do {
+            try await API.deleteSigned(s.key)
+            toast = "已删除"
+        } catch {
+            toast = error.localizedDescription
+        }
+        await loadSigned()
     }
 
     private func upload(_ file: RemoteFile) async {
