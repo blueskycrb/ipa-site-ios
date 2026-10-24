@@ -16,8 +16,10 @@ IPA 下载站：一个包装 ipatool 命令行的本地网站（仅用 Python �
 """
 
 import base64
+import io
 import plistlib
 import zipfile
+import hashlib
 import hmac
 import json
 import os
@@ -1153,6 +1155,131 @@ def add_cert(label, p12_data, profile_data, password):
     return public_cert(record)
 
 
+def _zip_name(info):
+    """Windows 打包的中文文件名多半是 GBK，zipfile 会按 cp437 读成乱码，这里转回来。"""
+    if info.flag_bits & 0x800:
+        return info.filename
+    try:
+        return info.filename.encode("cp437").decode("gbk")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return info.filename
+
+
+def _decode_text(data):
+    for enc in ("utf-8-sig", "gbk", "utf-16"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return ""
+
+
+def passwords_in(text):
+    """从「密码：1234」「password=abc」之类的文字里找密码；找不到时把短的单行文字当作候选。"""
+    found = [m.group(1) for m in re.finditer(
+        r"(?:密码|口令|证书密码|password|passwd|pwd|pass)\s*(?:是|为)?\s*[:：=]?\s*([^\s，,；;。]+)", text, re.I)]
+    if not found:
+        found = [l.strip() for l in text.splitlines() if l.strip() and len(l.strip()) <= 64 and " " not in l.strip()]
+    return found
+
+
+def _expand_files(files):
+    """把上传的文件列表展开：zip 解开成里面的文件（路径前加上压缩包名，当作文件夹），其他文件原样保留。"""
+    out = []
+    for name, data in files:
+        name = name.replace("\\", "/").rsplit("/", 1)[-1]
+        if not name.lower().endswith(".zip"):
+            out.append((name, data))
+            continue
+        try:
+            z = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            raise IpatoolError(f"{name} 不是有效的 zip 文件")
+        for info in z.infolist()[:200]:
+            inner = _zip_name(info).replace("\\", "/")
+            if (info.is_dir() or inner.startswith("__MACOSX/") or inner.rsplit("/", 1)[-1].startswith("._")
+                    or info.file_size > 5 * 1024 * 1024):
+                continue
+            try:
+                out.append((f"{name[:-4]}/{inner}", z.read(info)))
+            except (RuntimeError, zipfile.BadZipFile, NotImplementedError):
+                raise IpatoolError(f"{name} 解压失败：压缩包加了密码或用了不支持的压缩方式，请解压后直接选里面的文件")
+    return out
+
+
+def import_cert_files(files, password="", label=""):
+    """导入证书：files 里可以有 zip、p12、描述文件、写着密码的 txt。
+    自动找密码，按「描述文件里是否包含这个证书」把 p12 和描述文件配对，一次可以导入多套。"""
+    p12s, profiles, candidates = [], [], []
+    for name, data in _expand_files(files):
+        base = name.rsplit("/", 1)[-1]
+        ext = base.rsplit(".", 1)[-1].lower() if "." in base else ""
+        if ext in ("p12", "pfx"):
+            p12s.append((name, data))
+        elif ext == "mobileprovision":
+            try:
+                profiles.append((name, data, parse_profile(data)))
+            except IpatoolError:
+                pass
+        elif ext in ("txt", "md", "rtf", ""):
+            candidates += passwords_in(_decode_text(data))
+        if re.search(r"密码|password|pwd", base, re.I):   # 有的证书包把密码写在文件名里
+            candidates += passwords_in(base.rsplit(".", 1)[0])
+    if not p12s:
+        raise IpatoolError("没有找到 .p12 证书")
+    if not profiles:
+        raise IpatoolError("没有找到 .mobileprovision 描述文件")
+    # 候选密码：手动填的优先，其次压缩包里写的，最后试空密码
+    tries = list(dict.fromkeys(([password] if password else []) + candidates + [""]))[:30]
+    seen = set()   # 已经导入过的「证书 + 描述文件」，同一个包导两次不重复添加
+    if CERTS_DIR.is_dir():
+        for d in CERTS_DIR.iterdir():
+            try:
+                seen.add(hashlib.sha256((d / "cert.p12").read_bytes() + (d / "profile.mobileprovision").read_bytes()).digest())
+            except OSError:
+                continue
+    results = []
+    for p12_name, p12_data in p12s:
+        tmp = SIGN_WORK_DIR / ("import-" + uuid.uuid4().hex[:8] + ".p12")
+        SIGN_WORK_DIR.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(p12_data)
+        found = None
+        try:
+            for pw in tries:
+                try:
+                    found = (pw, p12_info(tmp, pw))
+                    break
+                except IpatoolError:
+                    continue
+        finally:
+            tmp.unlink(missing_ok=True)
+        if not found:
+            results.append({"file": p12_name, "ok": False, "error": "密码不对，请检查密码框里填的密码" if password
+                            else "密码不对：没找到能用的密码，请在密码框里填上再导入"})
+            continue
+        pw, info = found
+        matched = [p for p in profiles if info["der"] in p[2]["certsDER"]]
+        if not matched:
+            folder = p12_name.rsplit("/", 1)[0] if "/" in p12_name else ""
+            same_dir = [p for p in profiles if (p[0].rsplit("/", 1)[0] if "/" in p[0] else "") == folder]
+            matched = same_dir[:1] or (profiles[:1] if len(profiles) == 1 else [])
+        if not matched:
+            results.append({"file": p12_name, "ok": False, "error": "没找到包含这个证书的描述文件"})
+            continue
+        for prof_name, prof_data, prof in matched:
+            digest = hashlib.sha256(p12_data + prof_data).digest()
+            if digest in seen:
+                results.append({"file": p12_name, "profile": prof_name, "ok": False, "error": "已经导入过了，跳过"})
+                continue
+            seen.add(digest)
+            name = label or (p12_name.rsplit("/", 2)[-2] if p12_name.count("/") else None) or info["cn"] or prof["profileName"]
+            if len(matched) > 1:
+                name = f"{name} · {prof['profileName']}"
+            cert = add_cert(name[:40], p12_data, prof_data, pw)
+            results.append({"file": p12_name, "profile": prof_name, "ok": True, "cert": cert})
+    return results
+
+
 def delete_cert(cert_id):
     shutil.rmtree(_cert_dir(cert_id), ignore_errors=True)
     shutil.rmtree(SIGNED_DIR / cert_id, ignore_errors=True)
@@ -1440,6 +1567,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "upload": enqueue_alist(Path(name).name)})
             if url.path == "/api/certs":
                 return self.api_add_cert(data)
+            if url.path == "/api/certs/import":
+                return self.api_import_certs(data)
             if url.path == "/api/sign":
                 job = enqueue_sign(data.get("source") or "alist", data.get("name") or "", data.get("cert") or "")
                 return self.send_json({"ok": True, "job": job})
@@ -1607,6 +1736,21 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error_json("请同时选择 .p12 证书和 .mobileprovision 描述文件")
         cert = add_cert((d.get("label") or "").strip()[:40], p12, profile, d.get("password") or "")
         self.send_json({"ok": True, "cert": cert})
+
+    def api_import_certs(self, d):
+        files = []
+        try:
+            for f in (d.get("files") or [])[:20]:
+                files.append((str(f.get("name") or ""), base64.b64decode(f.get("data") or "", validate=True)))
+        except (ValueError, AttributeError):
+            return self.send_error_json("文件内容无效")
+        if not files:
+            return self.send_error_json("请选择证书 zip 包，或者 .p12 和 .mobileprovision 文件")
+        if sum(len(b) for _, b in files) > 30 * 1024 * 1024:
+            return self.send_error_json("文件太大了（超过 30 MB），证书包一般只有几十 KB")
+        results = import_cert_files(files, d.get("password") or "", (d.get("label") or "").strip()[:40])
+        self.send_json({"ok": any(r["ok"] for r in results), "results": results,
+                        "error": None if any(r["ok"] for r in results) else "没有导入成功的证书"})
 
     def api_sign_jobs(self):
         host = self.headers.get("Host")

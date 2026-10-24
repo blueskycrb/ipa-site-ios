@@ -13,6 +13,9 @@
   .form { padding: 12px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); }
   .form label { display: flex; flex-direction: column; gap: 4px; }
   .form input[type=file] { font-size: 12px; }
+  .drop { border: 1px dashed var(--line); border-radius: 8px; padding: 10px; }
+  .drop.over { border-color: var(--accent); }
+  .results { margin: 4px 0 0; padding-left: 18px; }
   .warn-text { color: var(--warn); }
   #appList { max-height: 70vh; }
 </style>
@@ -53,13 +56,15 @@
       <div class="panel-h">证书 <span class="sp"></span><button class="btn sm" id="toggleUpload">上传证书</button></div>
       <div class="list" id="certs"><div class="empty">还没有证书</div></div>
       <form class="form" id="uploadForm" hidden>
-        <label class="small">备注名称（可不填）<input type="text" id="label" maxlength="40" placeholder="例如：企业证书 A"></label>
-        <label class="small">p12 证书<input type="file" id="p12" accept=".p12,.pfx" required></label>
-        <label class="small">描述文件<input type="file" id="profile" accept=".mobileprovision" required></label>
-        <label class="small">证书密码<input type="password" id="pw" autocomplete="off" placeholder="没有密码就留空"></label>
+        <label class="small drop" id="drop">选择或拖进来：证书 zip 压缩包，或 .p12 + .mobileprovision
+          <input type="file" id="certFiles" multiple accept=".zip,.p12,.pfx,.mobileprovision,.txt">
+        </label>
+        <div class="small muted">可以一次选多个压缩包。压缩包里的密码 txt 会自动识别，p12 和描述文件会自动配对。</div>
+        <label class="small">证书密码<input type="password" id="pw" autocomplete="off" placeholder="压缩包里写了密码或没有密码，就留空"></label>
+        <label class="small">备注名称（可不填）<input type="text" id="label" maxlength="40" placeholder="默认用压缩包名"></label>
         <div class="small muted">证书和密码只保存在你的服务器上。</div>
         <div id="uploadMsg" class="small"></div>
-        <button class="btn primary" id="uploadBtn">上传并检查</button>
+        <button class="btn primary" id="uploadBtn">导入</button>
       </form>
     </div>
     <div class="card">
@@ -134,20 +139,31 @@ const readB64 = file => new Promise((ok, fail) => {
   fr.onerror = () => fail(fr.error);
   fr.readAsDataURL(file);
 });
+const drop = $("#drop");
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); $("#certFiles").files = e.dataTransfer.files; };
 $("#uploadForm").onsubmit = async e => {
   e.preventDefault();
   const msg = $("#uploadMsg"), btn = $("#uploadBtn");
-  const p12 = $("#p12").files[0], profile = $("#profile").files[0];
-  if (!p12 || !profile) { msg.className = "small err"; msg.textContent = "请选择 p12 证书和描述文件"; return; }
-  btn.disabled = true; msg.className = "small muted"; msg.innerHTML = `<span class="spinner"></span> 上传并检查中…`;
-  const r = await api("/api/certs", { body: { label: $("#label").value, password: $("#pw").value,
-    p12: await readB64(p12), profile: await readB64(profile) } });
+  const files = [...$("#certFiles").files];
+  if (!files.length) { msg.className = "small err"; msg.textContent = "请选择证书压缩包，或者 p12 和描述文件"; return; }
+  btn.disabled = true; msg.className = "small muted"; msg.innerHTML = `<span class="spinner"></span> 导入并检查中…`;
+  const body = { label: $("#label").value, password: $("#pw").value, files: [] };
+  for (const f of files) body.files.push({ name: f.name, data: await readB64(f) });
+  const r = await api("/api/certs/import", { body });
   btn.disabled = false;
-  if (!r.ok) { msg.className = "small err"; msg.textContent = r.error; return; }
-  $("#uploadForm").reset(); msg.textContent = "";
-  store("signCert", r.cert.id);
-  toast(r.cert.matchesProfile === false ? "已上传，但证书和描述文件不匹配，请检查" : `已添加证书：${r.cert.label}`);
-  $("#uploadForm").hidden = true;
+  const results = r.results || [];
+  const added = results.filter(x => x.ok);
+  msg.className = "small";
+  msg.innerHTML = (r.ok ? "" : `<div class="err">${esc(r.error)}</div>`) + (results.length ? `<ul class="results">${results.map(x => x.ok
+    ? `<li class="${x.cert.matchesProfile === false ? "warn-text" : ""}">已添加 <b>${esc(x.cert.label)}</b>${x.cert.matchesProfile === false ? "（证书和描述文件不匹配）" : ""}</li>`
+    : `<li class="err">${esc(x.file)}：${esc(x.error)}</li>`).join("")}</ul>` : "");
+  if (!added.length) return;
+  store("signCert", added[0].cert.id);
+  toast(`已导入 ${added.length} 个证书`);
+  $("#certFiles").value = "";
+  if (added.length === results.length) { $("#uploadForm").reset(); msg.textContent = ""; $("#uploadForm").hidden = true; }
   loadCerts();
 };
 $("#certs").onclick = async e => {
