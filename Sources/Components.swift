@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import UniformTypeIdentifiers
 
 struct AppIconView: View {
     let url: String?
@@ -354,6 +356,35 @@ struct ToastView: View {
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
                     if text == t { text = nil }
                 }
+        }
+    }
+}
+
+/// 系统文件选择器（复制模式）：选中的文件由系统复制一份到 App 的临时目录再交给我们，
+/// 不用处理访问权限，iCloud 里没下载到本地的文件也会先下载好。所有文件都能选，选完再检查类型。
+struct DocumentPicker: UIViewControllerRepresentable {
+    let onPick: ([URL]) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let vc = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        vc.allowsMultipleSelection = true
+        vc.delegate = context.coordinator
+        return vc
+    }
+
+    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick) }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: ([URL]) -> Void
+
+        init(_ onPick: @escaping ([URL]) -> Void) {
+            self.onPick = onPick
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onPick(urls)
         }
     }
 }

@@ -7,6 +7,7 @@ on:
     paths:
       - "Sources/**"
       - "Resources/**"
+      - "ShareExtension/**"
       - "project.yml"
       - ".github/workflows/build.yml"
   workflow_dispatch:
@@ -42,7 +43,11 @@ jobs:
             build
 
       - name: Show built Info.plist
-        run: plutil -p build/Build/Products/Release-iphoneos/IPASite.app/Info.plist
+        run: |
+          plutil -p build/Build/Products/Release-iphoneos/IPASite.app/Info.plist
+          # 分享扩展必须打包在 App 的 PlugIns 里
+          ls build/Build/Products/Release-iphoneos/IPASite.app/PlugIns/
+          plutil -p build/Build/Products/Release-iphoneos/IPASite.app/PlugIns/IPASiteShare.appex/Info.plist
 
       - name: Package IPA
         run: |

@@ -51,16 +51,20 @@ final class PhoneDownloads: NSObject, ObservableObject {
         }
         let stem = url.deletingPathExtension().lastPathComponent
         var dest = folder.appendingPathComponent(url.lastPathComponent)
+        if fm.fileExists(atPath: dest.path), size(of: dest) == size(of: url) {
+            return dest   // 同名同大小，已经导入过了
+        }
         var n = 1
         while fm.fileExists(atPath: dest.path) {
             n += 1
             dest = folder.appendingPathComponent("\(stem)_\(n).\(url.pathExtension)")
         }
-        // 别的 App「用其他应用打开」时，系统先把文件放在 Documents/Inbox，搬出来就行
-        if url.path.contains("/Documents/Inbox/") {
-            try fm.moveItem(at: url, to: dest)
-        } else {
-            try fm.copyItem(at: url, to: dest)
+        try fm.copyItem(at: url, to: dest)
+        // 系统给的临时副本（选择器复制模式放在 tmp，「用其他应用打开」放在 Documents/Inbox）用完删掉
+        let tmp = fm.temporaryDirectory.resolvingSymlinksInPath().path
+        let src = url.resolvingSymlinksInPath().path
+        if src.hasPrefix(tmp) || src.contains("-Inbox/") || src.contains("/Documents/Inbox/") {
+            try? fm.removeItem(at: url)
         }
         return dest
     }

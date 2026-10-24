@@ -105,6 +105,26 @@ struct FileApp: Decodable {
     let version: String?
     let icon: String?
     let bundleID: String?
+    let uploaded: Bool?   // 从手机 / 网页 / 分享扩展传上去的
+}
+
+/// 主 App 把服务器地址和访问密码通过剪贴板交给分享扩展（两者的设置不互通）
+enum ShareConfig {
+    static let prefix = "ipasite-config:"
+
+    static func encode(server: String, password: String) -> String {
+        let json = (try? JSONSerialization.data(withJSONObject: ["server": server, "password": password])) ?? Data()
+        return prefix + json.base64EncodedString()
+    }
+
+    static func decode(_ text: String) -> (server: String, password: String)? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.hasPrefix(prefix),
+              let data = Data(base64Encoded: String(t.dropFirst(prefix.count))),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let server = obj["server"], !server.isEmpty else { return nil }
+        return (server, obj["password"] ?? "")
+    }
 }
 
 struct RemoteFile: Decodable, Identifiable {

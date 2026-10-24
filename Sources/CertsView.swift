@@ -79,8 +79,9 @@ struct CertsView: View {
         .navigationTitle("证书管理")
         .task { await load() }
         .refreshable { await load() }
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.zip, .data], allowsMultipleSelection: true) { result in
-            pick(result)
+        .sheet(isPresented: $picking) {
+            DocumentPicker { urls in pick(urls) }
+                .ignoresSafeArea()
         }
         .confirmationDialog("删除这个证书？",
                             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
@@ -152,16 +153,15 @@ struct CertsView: View {
         loaded = true
     }
 
-    private func pick(_ result: Result<[URL], Error>) {
+    private func pick(_ urls: [URL]) {
         results = []
         message = nil
         do {
             var files: [PickedFile] = []
-            for url in try result.get() {
-                // 从「文件」App 选的文件要先申请访问权限
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            for url in urls {
+                // 选择器是复制模式，文件已经在 App 的临时目录里，读完就删
                 files.append(PickedFile(name: url.lastPathComponent, data: try Data(contentsOf: url)))
+                try? FileManager.default.removeItem(at: url)
             }
             if files.reduce(0, { $0 + $1.data.count }) > 30 * 1024 * 1024 {
                 message = "文件太大了（超过 30 MB），证书包一般只有几十 KB，是不是选错了？"

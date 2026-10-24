@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @AppStorage(Keys.server) private var server = Keys.defaultServer
@@ -19,6 +20,7 @@ struct SettingsView: View {
     @State private var loggingIn = false
     @State private var adding = false
     @State private var removing: AccountEntry?
+    @State private var copiedConfig = false
 
     private var accounts: [AccountEntry] { status?.accounts ?? [] }
 
@@ -43,8 +45,22 @@ struct SettingsView: View {
                     if let e = statusError {
                         Text(e).font(.caption).foregroundColor(.red)
                     }
+                    Button("复制配置给分享扩展") {
+                        // 只留在本机、5 分钟后自动清掉，避免密码通过「通用剪贴板」同步到别的设备
+                        UIPasteboard.general.setItems(
+                            [["public.utf8-plain-text": ShareConfig.encode(server: server, password: sitePassword)]],
+                            options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(300)])
+                        copiedConfig = true
+                    }
+                    .disabled(server.trimmingCharacters(in: .whitespaces).isEmpty)
+                    if copiedConfig {
+                        Text("已复制（5 分钟内有效）。在别的 App 里分享 IPA 或证书 → 选「IPA 下载」→ 点「从剪贴板读取」→「保存」。")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
                 } header: {
                     Text("服务器")
+                } footer: {
+                    Text("分享扩展（在微信、Safari、「文件」里分享到「IPA 下载」）和 App 的设置不互通，第一次使用要把服务器配置复制过去一次。")
                 }
 
                 Section {

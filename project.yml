@@ -6,7 +6,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.10.0"
+    MARKETING_VERSION: "1.11.0"
     # 编译号在 GitHub Actions 里用运行序号覆盖；本地编译时为 0
     CURRENT_PROJECT_VERSION: "0"
 targets:
@@ -67,4 +67,34 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - target: IPASiteShare   # 分享扩展，打包进 PlugIns/
     scheme: {}
+
+  # 分享扩展：在别的 App 里把 IPA / 证书包分享到「IPA 下载」，直接传到服务器签名或导入证书
+  IPASiteShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ShareExtension
+      - path: Sources/API.swift
+    info:
+      path: Supporting/ShareInfo.plist
+      properties:
+        CFBundleDisplayName: IPA 下载
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: ShareViewController
+          NSExtensionAttributes:
+            # 分享任何文件（最多 10 个）时都出现，是不是 IPA / 证书由扩展自己判断
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsFileWithMaxCount: 10
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.blueskycrb.ipasite.share
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO

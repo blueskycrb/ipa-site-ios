@@ -12,6 +12,7 @@ struct FilesView: View {
     @State private var signed: [SignedItem] = []
     @State private var certs: [CertInfo] = []
     @State private var importing = false
+    @State private var importResult: String?
 
     var body: some View {
         NavigationStack {
@@ -56,8 +57,16 @@ struct FilesView: View {
                     Label("导入 IPA", systemImage: "square.and.arrow.down")
                 }
             }
-            .fileImporter(isPresented: $importing, allowedContentTypes: [.data], allowsMultipleSelection: true) { result in
-                Task { await importPicked(result) }
+            .sheet(isPresented: $importing) {
+                DocumentPicker { urls in
+                    Task { await importPicked(urls) }
+                }
+                .ignoresSafeArea()
+            }
+            .alert("导入 IPA", isPresented: Binding(get: { importResult != nil }, set: { if !$0 { importResult = nil } })) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(importResult ?? "")
             }
             .refreshable {
                 await refresh()
@@ -119,28 +128,27 @@ struct FilesView: View {
         }
     }
 
-    private func importPicked(_ result: Result<[URL], Error>) async {
-        do {
-            let urls = try result.get()
-            var count = 0
-            var skipped: [String] = []
-            for url in urls {
-                do {
-                    _ = try await Task.detached { try PhoneDownloads.importFile(url) }.value
-                    count += 1
-                } catch {
-                    skipped.append(url.lastPathComponent)
-                }
+    private func importPicked(_ urls: [URL]) async {
+        var imported: [String] = []
+        var failed: [String] = []
+        for url in urls {
+            do {
+                let dest = try await Task.detached { try PhoneDownloads.importFile(url) }.value
+                imported.append(dest.lastPathComponent)
+            } catch {
+                failed.append("\(url.lastPathComponent)：\(error.localizedDescription)")
             }
-            phone.refresh()
-            if count > 0 {
-                toast = "已导入 \(count) 个，点「证书签名」签名安装" + (skipped.isEmpty ? "" : "（\(skipped.count) 个不是 IPA，已跳过）")
-            } else {
-                toast = "没有导入：请选择 .ipa 或 .tipa 文件"
-            }
-        } catch {
-            toast = "导入失败：\(error.localizedDescription)"
         }
+        phone.refresh()
+        var lines: [String] = []
+        if !imported.isEmpty {
+            lines.append("已导入 \(imported.count) 个：" + imported.joined(separator: "、")
+                         + "\n在「手机上的文件」里点「证书签名」，签好后会弹出安装。")
+        }
+        if !failed.isEmpty {
+            lines.append("没导入：\n" + failed.joined(separator: "\n"))
+        }
+        importResult = lines.isEmpty ? "没有选择文件" : lines.joined(separator: "\n\n")
     }
 
     @ViewBuilder
@@ -176,6 +184,10 @@ struct FilesView: View {
                                   phone: phone, toast: $toast)
                 InstallButton(name: file.name, systemAvailable: install?.enabled == true && file.app?.bundleID != nil,
                               toast: $toast)
+                if file.app?.uploaded == true {
+                    // 自己传上来的 IPA 不能系统安装，直接给签名按钮
+                    SignButton(name: file.name, source: "server", onDone: { await loadSigned() }, toast: $toast)
+                }
                 if alist?.enabled == true {
                     Button(file.alist?.status == "done" ? "重传" : "传到 Alist") {
                         Task { await upload(file) }
