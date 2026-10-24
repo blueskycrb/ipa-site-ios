@@ -40,7 +40,7 @@ struct AlistView: View {
                         Text("\(dir ?? "") · 共 \(total) 个文件")
                     }
                 } footer: {
-                    Text("从这里存到手机或安装，都是用网盘直链下载，不受家里宽带上行限速影响。TrollStore 能装任何 IPA；系统安装只对本站从 App Store 下载的 IPA 有效。")
+                    Text("从这里存到手机或安装，都是用网盘直链下载，不受家里宽带上行限速影响。系统安装只对本站从 App Store 下载的 IPA 有效；改版 / 砸壳的 IPA 用「证书签名」（证书在网页上传）或 TrollStore 安装。")
                 }
             }
             .navigationTitle("Alist")
@@ -112,6 +112,7 @@ struct AlistRow: View {
                     .disabled(phone.isRunning(item.name))
                 InstallButton(name: item.name, systemAvailable: installEnabled && item.app?.bundleID != nil,
                               toast: $toast)
+                SignButton(name: item.name, source: "alist", toast: $toast)
             }
             .controlSize(.small)
         }

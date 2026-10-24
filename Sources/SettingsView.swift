@@ -145,6 +145,16 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    if !API.base.isEmpty, let url = URL(string: API.base + "/sign") {
+                        Link("在网页上传 / 管理证书", destination: url)
+                    }
+                } header: {
+                    Text("证书签名")
+                } footer: {
+                    Text("在「Alist」页点「证书签名」，服务器用你上传的 p12 证书重签后自动弹出安装。适合改版 / 砸壳的 IPA；App Store 原版 IPA 是加密的，重签后会闪退，请用系统安装。")
+                }
+
+                Section {
                     LabeledContent("当前版本", value: "\(updater.currentVersion)（\(updater.currentBuild)）")
                     if let r = updater.latest {
                         if updater.hasUpdate {

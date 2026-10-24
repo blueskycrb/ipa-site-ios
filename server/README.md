@@ -9,6 +9,7 @@
 - 文件以「应用名_版本.ipa」命名，列表显示图标和版本
 - 下载完自动上传到 Alist（可选），可浏览 Alist 目录、用网盘直链下载
 - iPhone 一键安装：系统安装（itms-services，需要 HTTPS）或交给 TrollStore 安装
+- 证书签名：上传自己的 p12 证书 + 描述文件，选 Alist / 服务器上的 IPA 用 zsign 重签后安装（网页 `/sign`）
 - 访问密码、IPv4 / IPv6、多任务并行下载
 
 ---
@@ -114,6 +115,22 @@ docker compose logs -f ipa-site
 
 ---
 
+## 证书签名
+
+网页首页右上角「证书签名」（`/sign`），或 iPhone 客户端「Alist」页每个 IPA 的「证书签名」按钮。
+
+1. 在 `/sign` 页上传 `.p12` 证书、证书密码和 `.mobileprovision` 描述文件。页面会显示证书名称、有效期、支持的设备数，并检查证书是否在描述文件里（不在的话签出来装不上）。
+2. 在左边选 Alist 或服务器上的 IPA，点「签名」：服务器先从网盘取回文件，再用 [zsign](https://github.com/zhlynn/zsign) 重签（镜像里已编译好）。
+3. 签好后点「安装」（系统在线安装，需要 `IPA_PUBLIC_URL`），也可以交给 TrollStore 或直接下载。最近 20 个签好的文件会保留，可以随时重新安装。
+
+注意：
+
+- App Store 原版 IPA 是加密的，重签后打开会闪退；原版请用「系统安装」。证书签名适合改版 / 砸壳的 IPA。
+- 个人 / 开发者证书需要描述文件里包含手机的 UDID；企业证书不需要，但可能被苹果吊销（掉签）。
+- 证书和密码保存在数据目录的 `certs/` 里，只在你的服务器上。
+
+---
+
 ## 常用操作
 
 | 操作 | 命令 |
@@ -133,6 +150,8 @@ docker compose logs -f ipa-site
 | `.ipatool/` | 第一个 Apple ID 的 ipatool 登录状态（已加密） |
 | `accounts/<id>/.ipatool/` | 后来添加的其他 Apple ID 的登录状态，每个账号一个目录 |
 | `accounts.json` | 账号列表和当前使用的账号 |
+| `certs/<id>/` | 上传的签名证书、描述文件和证书密码（权限 600）。**不要外传** |
+| `signed/` | 证书签名后的 IPA（最多保留 20 个） |
 | `.keychain-passphrase` | 解密上面登录状态的口令，首次启动自动生成。**删了就要重新登录 Apple ID，也不要外传** |
 | `.link-secret` | 安装链接的签名密钥，自动生成 |
 | `.version-cache.json` | 查过的历史版本号和发布日期（不会变，查一次就记住，删了只是要重新查） |

@@ -58,6 +58,94 @@ struct InstallButton: View {
     }
 }
 
+/// 「证书签名」：用服务器上保存的 p12 证书重签这个 IPA，签好后自动弹出安装。
+/// 证书在网页「证书签名」页上传；有多个证书时先选一个。
+struct SignButton: View {
+    let name: String
+    let source: String   // "alist" 或 "server"
+    @Binding var toast: String?
+    @AppStorage(Keys.installMode) private var mode = "system"
+    @Environment(\.openURL) private var openURL
+    @State private var progress: String?
+    @State private var certs: [CertInfo] = []
+    @State private var choosing = false
+
+    private var signable: Bool {
+        name.range(of: #"\.(ipa|tipa)$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    var body: some View {
+        if signable {
+            Button(progress ?? "证书签名") { Task { await begin() } }
+                .buttonStyle(.bordered)
+                .disabled(progress != nil)
+                .confirmationDialog("用哪个证书签名？", isPresented: $choosing, titleVisibility: .visible) {
+                    ForEach(certs) { c in
+                        Button(c.label ?? c.cn ?? c.id) { Task { await run(c.id) } }
+                    }
+                }
+        }
+    }
+
+    private func begin() async {
+        do {
+            let r = try await API.certs()
+            guard r.zsign != false else {
+                toast = "服务器上还没有签名工具，请更新服务器（docker compose up -d --build）"
+                return
+            }
+            certs = r.certs
+            if certs.isEmpty {
+                toast = "还没有证书：请先在网页的「证书签名」页上传 p12 证书和描述文件"
+            } else if certs.count == 1 {
+                await run(certs[0].id)
+            } else {
+                choosing = true
+            }
+        } catch {
+            toast = error.localizedDescription
+        }
+    }
+
+    private func run(_ cert: String) async {
+        progress = "排队中…"
+        do {
+            let job = try await API.sign(source: source, name: name, cert: cert)
+            while true {
+                try await Task.sleep(nanoseconds: 1_500_000_000)
+                guard let j = try await API.signJobs().first(where: { $0.id == job.id }) else {
+                    throw APIError(message: "签名任务不见了，可能服务器重启过")
+                }
+                switch j.status {
+                case "downloading":
+                    if let size = j.size, size > 0 {
+                        progress = "取回 \(Int((j.downloaded ?? 0) / size * 100))%"
+                    } else {
+                        progress = "取回中…"
+                    }
+                case "signing":
+                    progress = "签名中…"
+                case "done":
+                    progress = nil
+                    let link = (mode == "trollstore" ? j.trollstoreURL : nil) ?? j.installURL ?? j.trollstoreURL
+                    if let s = link, let url = URL(string: s) {
+                        toast = "签名完成：\(j.appName ?? name)，在弹窗里点「安装」"
+                        openURL(url)
+                    }
+                    return
+                case "error":
+                    throw APIError(message: j.error ?? "签名失败")
+                default:
+                    progress = "排队中…"
+                }
+            }
+        } catch {
+            progress = nil
+            toast = error.localizedDescription
+        }
+    }
+}
+
 /// 「存到手机」：可以选从服务器下载，或从 Alist 网盘直链下载（不占家里上行带宽）
 struct SaveToPhoneButton: View {
     let name: String

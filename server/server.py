@@ -16,6 +16,8 @@ IPA 下载站：一个包装 ipatool 命令行的本地网站（仅用 Python �
 """
 
 import base64
+import plistlib
+import zipfile
 import hmac
 import json
 import os
@@ -1027,6 +1029,284 @@ def pick_install_source(name, wanted):
     raise IpatoolError("找不到这个文件")
 
 
+# ---------------------------------------------------------------- 证书签名（zsign）
+#
+# 用户上传自己的 p12 证书 + 描述文件，选 Alist 或服务器上的 IPA，用 zsign 重新签名后在线安装。
+# App Store 原版 IPA 是加密的，重签后会闪退；这个功能主要用来装改版 / 砸壳的 IPA。
+
+ZSIGN = os.environ.get("ZSIGN_PATH") or shutil.which("zsign")
+OPENSSL = shutil.which("openssl")
+CERTS_DIR = DATA_DIR / "certs"
+SIGNED_DIR = DATA_DIR / "signed"
+SIGN_WORK_DIR = DATA_DIR / ".sign-work"
+SIGNED_KEEP = 20          # 最多保留多少个签好的文件，旧的自动删
+shutil.rmtree(SIGN_WORK_DIR, ignore_errors=True)
+
+sign_jobs = {}
+sign_jobs_lock = threading.Lock()
+sign_queue = queue.Queue()
+_signed_meta_lock = threading.Lock()
+
+
+def parse_profile(data):
+    """读出 .mobileprovision（CMS 签名包着的 plist）里的关键信息。"""
+    start, end = data.find(b"<?xml"), data.find(b"</plist>")
+    if start < 0 or end < 0:
+        raise IpatoolError("描述文件格式不对，请上传 .mobileprovision 文件")
+    try:
+        pl = plistlib.loads(data[start:end + len(b"</plist>")])
+    except Exception:
+        raise IpatoolError("描述文件解析失败")
+    ent = pl.get("Entitlements") or {}
+    exp = pl.get("ExpirationDate")
+    return {
+        "profileName": pl.get("Name"),
+        "team": pl.get("TeamName"),
+        "teamID": (pl.get("TeamIdentifier") or [""])[0],
+        "appID": ent.get("application-identifier"),
+        "profileExpires": exp.timestamp() if exp else None,
+        "allDevices": bool(pl.get("ProvisionsAllDevices")),
+        "devices": len(pl.get("ProvisionedDevices") or []),
+        "certsDER": [bytes(c) for c in pl.get("DeveloperCertificates") or []],
+    }
+
+
+def p12_info(path, password):
+    """用 openssl 校验 p12 密码，读出证书名称、有效期和 DER（用来和描述文件比对）。"""
+    if not OPENSSL:
+        raise IpatoolError("服务器上没有 openssl，无法读取证书")
+    env = dict(os.environ, P12PW=password)
+    for extra in ([], ["-legacy"]):   # 老证书用的加密算法在 OpenSSL 3 里要加 -legacy
+        p = subprocess.run([OPENSSL, "pkcs12", "-in", str(path), "-nokeys", "-clcerts", "-passin", "env:P12PW", *extra],
+                           capture_output=True, env=env, timeout=30)
+        if p.returncode == 0 and b"BEGIN CERTIFICATE" in p.stdout:
+            pem = p.stdout[p.stdout.index(b"-----BEGIN CERTIFICATE-----"):]
+            info = subprocess.run([OPENSSL, "x509", "-noout", "-subject", "-enddate", "-nameopt", "RFC2253,-esc_msb"],
+                                  input=pem, capture_output=True, timeout=30).stdout.decode("utf-8", "replace")
+            der = subprocess.run([OPENSSL, "x509", "-outform", "DER"], input=pem, capture_output=True, timeout=30).stdout
+            cn = re.search(r"CN=((?:[^,\\\r\n]|\\.)*)", info)
+            org = re.search(r"(?<![A-Z])O=((?:[^,\\\r\n]|\\.)*)", info)
+            end = re.search(r"notAfter=(.+)", info)
+            expires = None
+            if end:
+                try:
+                    expires = time.mktime(time.strptime(end.group(1).strip(), "%b %d %H:%M:%S %Y %Z"))
+                except ValueError:
+                    pass
+            return {"cn": cn.group(1).replace("\\", "") if cn else None,
+                    "org": org.group(1).replace("\\", "") if org else None,
+                    "certExpires": expires, "der": der}
+    raise IpatoolError("证书密码不对，或者不是有效的 p12 文件")
+
+
+def _cert_dir(cert_id):
+    if not re.fullmatch(r"[0-9a-f]{8}", cert_id or ""):
+        raise IpatoolError("证书 ID 无效")
+    return CERTS_DIR / cert_id
+
+
+def load_cert(cert_id):
+    d = _cert_dir(cert_id)
+    try:
+        return json.loads((d / "cert.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise IpatoolError("证书不存在")
+
+
+def public_cert(c):
+    return {k: v for k, v in c.items() if k != "password"}
+
+
+def list_certs():
+    out = []
+    if CERTS_DIR.is_dir():
+        for d in CERTS_DIR.iterdir():
+            try:
+                out.append(public_cert(json.loads((d / "cert.json").read_text(encoding="utf-8"))))
+            except (OSError, ValueError):
+                continue
+    return sorted(out, key=lambda c: c.get("addedAt") or 0)
+
+
+def add_cert(label, p12_data, profile_data, password):
+    profile = parse_profile(profile_data)
+    cert_id = uuid.uuid4().hex[:8]
+    d = CERTS_DIR / cert_id
+    d.mkdir(parents=True)
+    try:
+        (d / "cert.p12").write_bytes(p12_data)
+        (d / "profile.mobileprovision").write_bytes(profile_data)
+        info = p12_info(d / "cert.p12", password)
+    except Exception:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    record = {
+        "id": cert_id, "label": label or info["cn"] or profile["profileName"], "cn": info["cn"], "org": info["org"],
+        "certExpires": info["certExpires"], "addedAt": time.time(), "password": password,
+        # 证书不在描述文件的证书列表里时，签出来的包装不上
+        "matchesProfile": info["der"] in profile["certsDER"] if profile["certsDER"] else None,
+        **{k: v for k, v in profile.items() if k != "certsDER"},
+    }
+    (d / "cert.json").write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+    for f in d.iterdir():
+        os.chmod(f, 0o600)
+    return public_cert(record)
+
+
+def delete_cert(cert_id):
+    shutil.rmtree(_cert_dir(cert_id), ignore_errors=True)
+    shutil.rmtree(SIGNED_DIR / cert_id, ignore_errors=True)
+    with _signed_meta_lock:
+        meta = load_signed_meta()
+        for k in [k for k in meta if k.startswith(cert_id + "/")]:
+            del meta[k]
+        save_signed_meta(meta)
+
+
+def load_signed_meta():
+    try:
+        return json.loads((SIGNED_DIR / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_signed_meta(meta):
+    SIGNED_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = SIGNED_DIR / "meta.tmp"
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, SIGNED_DIR / "meta.json")
+
+
+def signed_path_of(key):
+    """key 形如「证书ID/文件名」，返回签好的文件路径（防止跳出目录）。"""
+    cert_id, _, name = key.partition("/")
+    _cert_dir(cert_id)   # 校验证书 ID 格式
+    p = (SIGNED_DIR / cert_id / name).resolve()
+    if p.parent != (SIGNED_DIR / cert_id).resolve():
+        raise IpatoolError("文件名无效")
+    return p
+
+
+def ipa_info(path):
+    """读出 IPA 主程序的 Bundle ID、版本、名称。"""
+    with zipfile.ZipFile(path) as z:
+        for n in z.namelist():
+            parts = n.split("/")
+            if len(parts) == 3 and parts[0] == "Payload" and parts[1].endswith(".app") and parts[2] == "Info.plist":
+                pl = plistlib.loads(z.read(n))
+                return {"bundleID": pl.get("CFBundleIdentifier"),
+                        "version": pl.get("CFBundleShortVersionString") or pl.get("CFBundleVersion"),
+                        "appName": pl.get("CFBundleDisplayName") or pl.get("CFBundleName")}
+    raise IpatoolError("IPA 里没找到 Info.plist，可能不是有效的 IPA")
+
+
+def enqueue_sign(source, name, cert_id):
+    check_plain_name(name)
+    load_cert(cert_id)
+    if source == "server" and not (DOWNLOAD_DIR / name).is_file():
+        raise IpatoolError("服务器上没有这个文件")
+    if source == "alist" and not alist_enabled():
+        raise IpatoolError("还没配置 Alist")
+    job = {"id": uuid.uuid4().hex[:10], "status": "queued", "source": source, "name": name, "cert": cert_id,
+           "certLabel": load_cert(cert_id).get("label"), "createdAt": time.time(),
+           "downloaded": 0, "size": 0, "error": None, "key": None}
+    with sign_jobs_lock:
+        sign_jobs[job["id"]] = job
+    sign_queue.put(job["id"])
+    return job
+
+
+def _fetch_to(url, dest, job):
+    with urllib.request.urlopen(url, timeout=60) as r, open(dest, "wb") as f:
+        job["size"] = int(r.headers.get("Content-Length") or 0)
+        while chunk := r.read(1 << 20):
+            f.write(chunk)
+            job["downloaded"] += len(chunk)
+
+
+def _prune_signed():
+    files = sorted((p for p in SIGNED_DIR.glob("*/*") if p.is_file()), key=lambda p: p.stat().st_mtime, reverse=True)
+    if len(files) <= SIGNED_KEEP:
+        return
+    with _signed_meta_lock:
+        meta = load_signed_meta()
+        for p in files[SIGNED_KEEP:]:
+            p.unlink(missing_ok=True)
+            meta.pop(f"{p.parent.name}/{p.name}", None)
+        save_signed_meta(meta)
+
+
+def run_sign(job):
+    if not ZSIGN:
+        raise IpatoolError("服务器上没有 zsign，请用最新的 Dockerfile 重新构建镜像")
+    cert = load_cert(job["cert"])
+    cdir = _cert_dir(job["cert"])
+    work = SIGN_WORK_DIR / job["id"]
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        src = work / "input.ipa"   # zsign 按扩展名识别，.tipa 也统一叫 .ipa
+        if job["source"] == "server":
+            shutil.copyfile(DOWNLOAD_DIR / job["name"], src)
+        else:
+            job["status"] = "downloading"
+            _fetch_to(alist_link(job["name"])[0], src, job)
+        job["status"] = "signing"
+        out_name = re.sub(r"\.tipa$", ".ipa", job["name"], flags=re.I)
+        if not out_name.lower().endswith(".ipa"):
+            out_name += ".ipa"
+        out = SIGNED_DIR / job["cert"] / out_name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp_out = work / "signed.ipa"
+        p = subprocess.run([ZSIGN, "-k", str(cdir / "cert.p12"), "-p", cert["password"],
+                            "-m", str(cdir / "profile.mobileprovision"), "-z", "1", "-o", str(tmp_out), str(src)],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60 * 60)
+        if p.returncode != 0 or not tmp_out.is_file():
+            detail = (p.stderr or p.stdout).strip().splitlines()
+            raise IpatoolError("签名失败：" + (" ".join(detail[-3:]) if detail else f"zsign 退出码 {p.returncode}"))
+        info = ipa_info(tmp_out)
+        os.replace(tmp_out, out)
+        key = f"{job['cert']}/{out_name}"
+        with _signed_meta_lock:
+            meta = load_signed_meta()
+            meta[key] = {**info, "source": job["source"], "sourceName": job["name"], "signedAt": time.time(),
+                         "cert": job["cert"], "size": out.stat().st_size,
+                         "icon": (load_meta().get(job["name"]) or {}).get("icon")}
+            save_signed_meta(meta)
+        job.update(key=key, **info)
+        _prune_signed()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def sign_worker():
+    while True:
+        job_id = sign_queue.get()
+        job = sign_jobs[job_id]
+        job["startedAt"] = time.time()
+        try:
+            run_sign(job)
+            job["status"] = "done"
+        except (IpatoolError, OSError, zipfile.BadZipFile, subprocess.TimeoutExpired) as e:
+            job["status"], job["error"] = "error", str(e)
+        job["finishedAt"] = time.time()
+        sign_queue.task_done()
+
+
+threading.Thread(target=sign_worker, daemon=True).start()
+
+
+def signed_links(key, host):
+    """签好的文件的安装 / 下载链接（带签名，几小时内有效）。"""
+    base = PUBLIC_URL or f"http://{host}"
+    dl = base + signed_path("sdl", key, "/sdl")
+    return {
+        "installURL": ("itms-services://?action=download-manifest&url=" + urllib.parse.quote(
+            PUBLIC_URL + signed_path("install-signed", key, "/install/signed", ".plist"), safe="")) if install_enabled() else None,
+        "trollstoreURL": "apple-magnifier://install?url=" + urllib.parse.quote(dl, safe=""),
+        "downloadURL": dl,
+    }
+
+
 # ---------------------------------------------------------------- HTTP
 
 class Handler(BaseHTTPRequestHandler):
@@ -1087,7 +1367,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         # iOS 安装器取清单和 IPA 时不带网站密码，靠链接里的签名放行
-        if url.path.startswith(("/install/", "/dl/")):
+        if url.path.startswith(("/install/", "/dl/", "/sdl/")):
             try:
                 return self.serve_signed(url.path)
             except IpatoolError as e:
@@ -1098,6 +1378,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path in ("/", "/index.html"):
                 return self.serve_static("index.html")
+            if url.path in ("/sign", "/sign.html"):
+                return self.serve_static("sign.html")
+            if url.path.startswith("/static/"):
+                return self.serve_static(url.path[len("/static/"):])
+            if url.path == "/api/certs":
+                return self.api_certs()
+            if url.path == "/api/sign/jobs":
+                return self.api_sign_jobs()
+            if url.path == "/api/signed":
+                return self.api_signed()
             if url.path == "/api/status":
                 return self.api_status()
             if url.path == "/api/search":
@@ -1148,6 +1438,16 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.safe_file(name):
                     return self.send_error_json("文件不存在", 404)
                 return self.send_json({"ok": True, "upload": enqueue_alist(Path(name).name)})
+            if url.path == "/api/certs":
+                return self.api_add_cert(data)
+            if url.path == "/api/sign":
+                job = enqueue_sign(data.get("source") or "alist", data.get("name") or "", data.get("cert") or "")
+                return self.send_json({"ok": True, "job": job})
+            if url.path == "/api/sign/clear":
+                with sign_jobs_lock:
+                    for k in [k for k, j in sign_jobs.items() if j["status"] in ("done", "error")]:
+                        del sign_jobs[k]
+                return self.send_json({"ok": True})
             if url.path == "/api/jobs/clear":
                 with jobs_lock:
                     for k in [k for k, j in jobs.items() if j["status"] in ("done", "error")]:
@@ -1161,23 +1461,52 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         url = urllib.parse.urlparse(self.path)
-        if url.path.startswith("/api/files/"):
-            p = self.safe_file(url.path[len("/api/files/"):])
-            if not p:
-                return self.send_error_json("文件不存在", 404)
-            p.unlink()  # 应用信息留在 .meta.json 里，Alist 上的同名副本还要用
-            return self.send_json({"ok": True})
-        self.send_error_json("Not found", 404)
+        try:
+            if url.path.startswith("/api/files/"):
+                p = self.safe_file(url.path[len("/api/files/"):])
+                if not p:
+                    return self.send_error_json("文件不存在", 404)
+                p.unlink()  # 应用信息留在 .meta.json 里，Alist 上的同名副本还要用
+                return self.send_json({"ok": True})
+            if url.path.startswith("/api/certs/"):
+                delete_cert(url.path[len("/api/certs/"):])
+                return self.send_json({"ok": True})
+            if url.path.startswith("/api/signed/"):
+                key = urllib.parse.unquote(url.path[len("/api/signed/"):])
+                signed_path_of(key).unlink(missing_ok=True)
+                with _signed_meta_lock:
+                    meta = load_signed_meta()
+                    meta.pop(key, None)
+                    save_signed_meta(meta)
+                return self.send_json({"ok": True})
+            self.send_error_json("Not found", 404)
+        except IpatoolError as e:
+            self.send_error_json(str(e), 400)
 
     # handlers
+    STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
+                    ".js": "text/javascript; charset=utf-8"}
+
     def serve_static(self, name):
-        p = STATIC_DIR / name
+        p = (STATIC_DIR / name).resolve()
+        if p.parent != STATIC_DIR.resolve() or not p.is_file() or p.suffix not in self.STATIC_TYPES:
+            return self.send_error_json("Not found", 404)
         body = p.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", self.STATIC_TYPES[p.suffix])
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def send_file(self, p):
+        size = p.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(p.name))
+        self.end_headers()
+        with p.open("rb") as f:
+            shutil.copyfileobj(f, self.wfile, 1024 * 1024)
 
     def serve_signed(self, path):
         if path.startswith("/dl/"):
@@ -1185,14 +1514,28 @@ class Handler(BaseHTTPRequestHandler):
             if not name:
                 return self.send_error_json("链接无效或已过期", 403)
             return self.serve_ipa(urllib.parse.quote(name))
+        if path.startswith("/sdl/"):   # 证书签名后的文件
+            key = verify_signed("sdl", path[len("/sdl/"):])
+            if not key:
+                return self.send_error_json("链接无效或已过期", 403)
+            p = signed_path_of(key)
+            return self.send_file(p) if p.is_file() else self.send_error_json("文件不存在", 404)
         kind, _, rest = path[len("/install/"):].partition("/")
-        if kind not in ("server", "alist"):
+        if kind not in ("server", "alist", "signed"):
             return self.send_error_json("Not found", 404)
         name = verify_signed("install-" + kind, rest, ".plist")
         if not name:
             return self.send_error_json("链接无效或已过期", 403)
-        ipa_url = PUBLIC_URL + signed_path("dl", name, "/dl") if kind == "server" else alist_link(name)[0]
-        body = build_manifest(name, ipa_url)
+        if kind == "signed":
+            info = load_signed_meta().get(name) or {}
+            body = plistlib.dumps({"items": [{"assets": [
+                {"kind": "software-package", "url": PUBLIC_URL + signed_path("sdl", name, "/sdl")}] + (
+                [{"kind": "display-image", "needs-shine": False, "url": info["icon"]}] if info.get("icon") else []),
+                "metadata": {"bundle-identifier": info.get("bundleID") or "", "bundle-version": info.get("version") or "1.0",
+                             "kind": "software", "title": info.get("appName") or name.partition("/")[2]}}]})
+        else:
+            ipa_url = PUBLIC_URL + signed_path("dl", name, "/dl") if kind == "server" else alist_link(name)[0]
+            body = build_manifest(name, ipa_url)
         self.send_response(200)
         self.send_header("Content-Type", "text/xml; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -1248,15 +1591,43 @@ class Handler(BaseHTTPRequestHandler):
         p = self.safe_file(name)
         if not p:
             return self.send_error_json("文件不存在", 404)
-        size = p.stat().st_size
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(size))
-        self.send_header("Content-Disposition",
-                         "attachment; filename*=UTF-8''" + urllib.parse.quote(p.name))
-        self.end_headers()
-        with p.open("rb") as f:
-            shutil.copyfileobj(f, self.wfile, 1024 * 1024)
+        self.send_file(p)
+
+    # ----- 证书签名
+    def api_certs(self):
+        self.send_json({"ok": True, "zsign": bool(ZSIGN), "installEnabled": install_enabled(), "certs": list_certs()})
+
+    def api_add_cert(self, d):
+        try:
+            p12 = base64.b64decode(d.get("p12") or "", validate=True)
+            profile = base64.b64decode(d.get("profile") or "", validate=True)
+        except ValueError:
+            return self.send_error_json("文件内容无效")
+        if not p12 or not profile:
+            return self.send_error_json("请同时选择 .p12 证书和 .mobileprovision 描述文件")
+        cert = add_cert((d.get("label") or "").strip()[:40], p12, profile, d.get("password") or "")
+        self.send_json({"ok": True, "cert": cert})
+
+    def api_sign_jobs(self):
+        host = self.headers.get("Host")
+        with sign_jobs_lock:
+            out = []
+            for j in sorted(sign_jobs.values(), key=lambda j: j["createdAt"], reverse=True):
+                j = dict(j)
+                if j["status"] == "done" and j.get("key"):
+                    j.update(signed_links(j["key"], host))
+                out.append(j)
+        self.send_json({"ok": True, "jobs": out})
+
+    def api_signed(self):
+        host, certs = self.headers.get("Host"), {c["id"]: c for c in list_certs()}
+        items = []
+        for key, info in load_signed_meta().items():
+            if signed_path_of(key).is_file():
+                items.append({"key": key, **info, "certLabel": (certs.get(info.get("cert")) or {}).get("label"),
+                              **signed_links(key, host)})
+        items.sort(key=lambda i: i.get("signedAt") or 0, reverse=True)
+        self.send_json({"ok": True, "items": items})
 
     def api_status(self):
         exe = find_ipatool()

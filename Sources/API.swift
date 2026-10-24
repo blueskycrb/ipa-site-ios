@@ -149,6 +149,41 @@ struct AlistPage: Decodable {
     let dir: String?
 }
 
+/// 服务器上保存的签名证书（不含密码）
+struct CertInfo: Decodable, Identifiable {
+    let id: String
+    let label: String?
+    let cn: String?
+    let certExpires: Double?
+    let profileExpires: Double?
+    let allDevices: Bool?
+    let devices: Int?
+    let matchesProfile: Bool?
+}
+
+struct CertsResponse: Decodable {
+    let zsign: Bool?
+    let installEnabled: Bool?
+    let certs: [CertInfo]
+}
+
+/// 证书签名任务
+struct SignJob: Decodable, Identifiable {
+    let id: String
+    let status: String          // queued / downloading / signing / done / error
+    let name: String
+    let downloaded: Double?
+    let size: Double?
+    let error: String?
+    let appName: String?
+    let version: String?
+    let installURL: String?
+    let trollstoreURL: String?
+    let downloadURL: String?
+}
+
+private struct SignJobResponse: Decodable { let job: SignJob }
+private struct SignJobsResponse: Decodable { let jobs: [SignJob] }
 private struct LinkResponse: Decodable { let url: String?; let size: Double? }
 private struct InstallResponse: Decodable { let ok: Bool; let url: String?; let source: String?; let error: String? }
 private struct SearchResponse: Decodable { let apps: [AppItem]? }
@@ -322,6 +357,20 @@ enum API {
             throw APIError(message: "Alist 没有返回可用的下载链接")
         }
         return u
+    }
+
+    static func certs() async throws -> CertsResponse {
+        try await send(CertsResponse.self, request("/api/certs"))
+    }
+
+    /// 用证书签名一个 IPA；source 为 alist 或 server
+    static func sign(source: String, name: String, cert: String) async throws -> SignJob {
+        let body = ["source": source, "name": name, "cert": cert]
+        return try await send(SignJobResponse.self, request("/api/sign", method: "POST", body: body)).job
+    }
+
+    static func signJobs() async throws -> [SignJob] {
+        try await send(SignJobsResponse.self, request("/api/sign/jobs")).jobs
     }
 
     /// 返回安装链接：mode 为 trollstore 时是 apple-magnifier://install?url=…，否则是 itms-services://

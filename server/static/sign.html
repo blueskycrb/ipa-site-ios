@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>证书签名 · IPA 下载站</title>
+<link rel="stylesheet" href="/static/app.css">
+<style>
+  .tabs { display: flex; gap: 6px; padding: 10px 12px 0; }
+  .tabs .btn.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; align-items: center; }
+  .toolbar input[type=search] { flex: 1 1 200px; min-width: 0; }
+  .form { padding: 12px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); }
+  .form label { display: flex; flex-direction: column; gap: 4px; }
+  .form input[type=file] { font-size: 12px; }
+  .warn-text { color: var(--warn); }
+  #appList { max-height: 70vh; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>证书签名</h1>
+    <span class="muted small">用你自己的 p12 证书给 IPA 重新签名后安装</span>
+    <span class="sp"></span>
+    <a class="btn sm" href="/">← 返回下载站</a>
+  </div>
+</header>
+
+<main>
+  <section>
+    <div id="notice"></div>
+    <div class="card">
+      <div class="tabs">
+        <button class="btn sm active" data-tab="alist">Alist</button>
+        <button class="btn sm" data-tab="server">服务器文件</button>
+      </div>
+      <div class="toolbar">
+        <input type="search" id="q" placeholder="搜索文件名（回车）">
+        <label class="small muted">用证书 <select id="certSel"></select></label>
+      </div>
+      <div class="list" id="appList"><div class="empty">加载中…</div></div>
+      <div id="more" style="padding:8px 12px" hidden><button class="btn sm" id="moreBtn">加载更多</button></div>
+    </div>
+    <div class="notice small muted" style="margin-top:12px">
+      App Store 原版 IPA 是加密的，重签后打开会闪退，原版请回下载站用「系统安装」。证书签名适合 Alist 里的改版 / 砸壳 IPA。
+      个人或开发者证书需要描述文件里包含你手机的 UDID；企业证书不用，但可能被苹果吊销（掉签）。
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <div class="panel-h">证书 <span class="sp"></span><button class="btn sm" id="toggleUpload">上传证书</button></div>
+      <div class="list" id="certs"><div class="empty">还没有证书</div></div>
+      <form class="form" id="uploadForm" hidden>
+        <label class="small">备注名称（可不填）<input type="text" id="label" maxlength="40" placeholder="例如：企业证书 A"></label>
+        <label class="small">p12 证书<input type="file" id="p12" accept=".p12,.pfx" required></label>
+        <label class="small">描述文件<input type="file" id="profile" accept=".mobileprovision" required></label>
+        <label class="small">证书密码<input type="password" id="pw" autocomplete="off" placeholder="没有密码就留空"></label>
+        <div class="small muted">证书和密码只保存在你的服务器上。</div>
+        <div id="uploadMsg" class="small"></div>
+        <button class="btn primary" id="uploadBtn">上传并检查</button>
+      </form>
+    </div>
+    <div class="card">
+      <div class="panel-h">签名任务 <span class="sp"></span><button class="btn sm" id="clearJobs">清除已完成</button></div>
+      <div class="list" id="jobs"><div class="empty">暂无任务</div></div>
+    </div>
+    <div class="card">
+      <div class="panel-h">已签名文件 <span class="sp"></span><button class="btn sm" id="refreshSigned">刷新</button></div>
+      <div class="list" id="signed"><div class="empty">暂无</div></div>
+    </div>
+  </aside>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtSize = n => n == null ? "" : n > 1<<30 ? (n/(1<<30)).toFixed(2)+" GB" : (n/(1<<20)).toFixed(1)+" MB";
+const fmtDate = t => t ? new Date(t * 1000).toLocaleDateString() : "?";
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 3500);
+}
+async function api(path, opts = {}) {
+  const init = { method: opts.method || (opts.body ? "POST" : "GET"), headers: {} };
+  if (opts.body) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(opts.body); }
+  const r = await fetch(path, init);
+  const data = await r.json().catch(() => ({ ok: false, error: "服务器响应异常" }));
+  if (!r.ok && data.ok !== false) data.ok = false;
+  return data;
+}
+function store(key, val) { try { if (val === undefined) return localStorage.getItem(key); localStorage.setItem(key, val); } catch { return null; } }
+
+// ---------- 证书
+let certs = [], installEnabled = false;
+async function loadCerts() {
+  const r = await api("/api/certs");
+  if (!r.ok) return toast(r.error);
+  certs = r.certs; installEnabled = r.installEnabled;
+  const notes = [];
+  if (!r.zsign) notes.push(`<div class="notice warn">服务器上没有 zsign，请用最新的 Dockerfile 重新构建镜像（docker compose up -d --build）。</div>`);
+  if (!installEnabled) notes.push(`<div class="notice warn">没有配置 IPA_PUBLIC_URL（https 地址），签好后只能下载或交给 TrollStore，不能直接「安装」。</div>`);
+  $("#notice").innerHTML = notes.join("");
+  const now = Date.now() / 1000;
+  $("#certs").innerHTML = certs.length ? certs.map(c => {
+    const expired = Math.min(c.certExpires || Infinity, c.profileExpires || Infinity) < now;
+    const devices = c.allDevices ? "所有设备（企业）" : `${c.devices} 台设备`;
+    return `<div class="row">
+      <div class="grow">
+        <div class="ellip"><b>${esc(c.label)}</b></div>
+        <div class="small muted ellip" title="${esc(c.cn)}">${esc(c.cn || "")}</div>
+        <div class="small muted">证书到 ${fmtDate(c.certExpires)} · 描述文件到 ${fmtDate(c.profileExpires)} · ${devices}</div>
+        <div class="small muted ellip">描述文件：${esc(c.profileName || "")}（${esc(c.appID || "")}）</div>
+        ${expired ? `<div class="small err">已过期，签出来的包装不上</div>` : ""}
+        ${c.matchesProfile === false ? `<div class="small err">这个证书不在描述文件里，签出来的包装不上，请检查是否配错了</div>` : ""}
+      </div>
+      <button class="btn sm danger" data-delcert="${esc(c.id)}">删除</button>
+    </div>`;
+  }).join("") : `<div class="empty">还没有证书，点右上角「上传证书」</div>`;
+  const saved = store("signCert");
+  $("#certSel").innerHTML = certs.map(c => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join("") || `<option value="">先上传证书</option>`;
+  if (certs.some(c => c.id === saved)) $("#certSel").value = saved;
+  $("#uploadForm").hidden = certs.length > 0 && $("#uploadForm").hidden;
+}
+$("#certSel").onchange = e => store("signCert", e.target.value);
+$("#toggleUpload").onclick = () => { $("#uploadForm").hidden = !$("#uploadForm").hidden; };
+
+const readB64 = file => new Promise((ok, fail) => {
+  const fr = new FileReader();
+  fr.onload = () => ok(String(fr.result).split(",")[1] || "");
+  fr.onerror = () => fail(fr.error);
+  fr.readAsDataURL(file);
+});
+$("#uploadForm").onsubmit = async e => {
+  e.preventDefault();
+  const msg = $("#uploadMsg"), btn = $("#uploadBtn");
+  const p12 = $("#p12").files[0], profile = $("#profile").files[0];
+  if (!p12 || !profile) { msg.className = "small err"; msg.textContent = "请选择 p12 证书和描述文件"; return; }
+  btn.disabled = true; msg.className = "small muted"; msg.innerHTML = `<span class="spinner"></span> 上传并检查中…`;
+  const r = await api("/api/certs", { body: { label: $("#label").value, password: $("#pw").value,
+    p12: await readB64(p12), profile: await readB64(profile) } });
+  btn.disabled = false;
+  if (!r.ok) { msg.className = "small err"; msg.textContent = r.error; return; }
+  $("#uploadForm").reset(); msg.textContent = "";
+  store("signCert", r.cert.id);
+  toast(r.cert.matchesProfile === false ? "已上传，但证书和描述文件不匹配，请检查" : `已添加证书：${r.cert.label}`);
+  $("#uploadForm").hidden = true;
+  loadCerts();
+};
+$("#certs").onclick = async e => {
+  const b = e.target.closest("[data-delcert]"); if (!b) return;
+  if (!confirm("删除这个证书？用它签好的文件也会一起删除。")) return;
+  const r = await api("/api/certs/" + b.dataset.delcert, { method: "DELETE" });
+  toast(r.ok ? "已删除" : r.error); loadCerts(); loadSigned();
+};
+
+// ---------- 选 App
+let tab = "alist", items = [], total = 0;
+document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => {
+  document.querySelectorAll("[data-tab]").forEach(x => x.classList.toggle("active", x === b));
+  tab = b.dataset.tab; loadApps(true);
+});
+async function loadApps(reset) {
+  const list = $("#appList");
+  if (reset) { items = []; list.innerHTML = `<div class="empty"><span class="spinner"></span> 加载中…</div>`; }
+  const q = $("#q").value.trim();
+  if (tab === "alist") {
+    const r = await api("/api/alist/list?" + new URLSearchParams({ q, offset: items.length, limit: 50 }));
+    if (!r.ok) { list.innerHTML = `<div class="empty err">${esc(r.error)}</div>`; return; }
+    items = items.concat(r.items); total = r.total;
+  } else {
+    const r = await api("/api/files");
+    if (!r.ok) { list.innerHTML = `<div class="empty err">${esc(r.error)}</div>`; return; }
+    items = r.files.filter(f => !q || f.name.toLowerCase().includes(q.toLowerCase()))
+      .map(f => ({ name: f.name, size: f.size, modified: new Date(f.mtime * 1000).toISOString(), app: f.app }));
+    total = items.length;
+  }
+  list.innerHTML = items.length ? items.map(it => {
+    const app = it.app || {};
+    const signable = /\.(ipa|tipa)$/i.test(it.name);
+    return `<div class="row">
+      ${app.icon ? `<img src="${esc(app.icon)}" alt="">` : ""}
+      <div class="grow">
+        ${app.name ? `<div class="ellip">${esc(app.name)} <span class="muted small">v${esc(app.version)}</span></div>` : ""}
+        <div class="ellip ${app.name ? "small muted" : "small"}" title="${esc(it.name)}">${esc(it.name)}</div>
+        <div class="small muted">${fmtSize(it.size)} · ${esc((it.modified || "").slice(0, 16).replace("T", " "))}</div>
+      </div>
+      ${signable ? `<button class="btn sm primary" data-sign="${esc(it.name)}">签名</button>` : `<span class="small muted">不是 IPA</span>`}
+    </div>`;
+  }).join("") : `<div class="empty">${q ? "没有找到相关文件" : "目录是空的"}</div>`;
+  $("#more").hidden = items.length >= total;
+  $("#moreBtn").textContent = `加载更多（还有 ${total - items.length} 个）`;
+}
+$("#q").onkeydown = e => { if (e.key === "Enter") loadApps(true); };
+$("#moreBtn").onclick = () => loadApps(false);
+$("#appList").onclick = async e => {
+  const b = e.target.closest("[data-sign]"); if (!b) return;
+  const cert = $("#certSel").value;
+  if (!cert) return toast("请先上传证书");
+  const r = await api("/api/sign", { body: { source: tab, name: b.dataset.sign, cert } });
+  if (!r.ok) return toast(r.error);
+  toast("已加入签名队列");
+  pollJobs();
+};
+
+// ---------- 签名任务 / 已签名文件
+function linkButtons(x) {
+  return `${x.installURL ? `<a class="btn sm primary" href="${esc(x.installURL)}">安装</a>` : ""}
+    <a class="btn sm" href="${esc(x.trollstoreURL)}">TrollStore</a>
+    <a class="btn sm" href="${esc(x.downloadURL)}">下载</a>`;
+}
+let pollTimer = null, lastDone = "";
+async function pollJobs() {
+  clearTimeout(pollTimer);
+  const r = await api("/api/sign/jobs");
+  if (!r.ok) return;
+  $("#jobs").innerHTML = r.jobs.length ? r.jobs.map(j => {
+    const st = { queued: "排队中", downloading: `从 Alist 取回 ${fmtSize(j.downloaded)}${j.size ? " / " + fmtSize(j.size) : ""}`,
+                 signing: "签名中…", done: "签名完成", error: "失败" }[j.status];
+    const pct = j.status === "downloading" && j.size ? Math.min(100, j.downloaded / j.size * 100) : null;
+    return `<div class="row">
+      <div class="grow">
+        <div class="ellip small" title="${esc(j.name)}">${esc(j.appName ? `${j.appName} ${j.version || ""}` : j.name)}</div>
+        <div class="small st-${j.status === "error" ? "error" : j.status === "done" ? "done" : "running"}">${st} · ${esc(j.certLabel || "")}</div>
+        ${pct != null ? `<div class="prog"><div style="width:${pct.toFixed(1)}%"></div></div>` : j.status === "signing" ? `<div class="prog indet"><div></div></div>` : ""}
+        ${j.error ? `<div class="small err">${esc(j.error)}</div>` : ""}
+        ${j.status === "done" ? `<div class="actions">${linkButtons(j)}</div>` : ""}
+      </div>
+    </div>`;
+  }).join("") : `<div class="empty">暂无任务</div>`;
+  const done = r.jobs.filter(j => j.status === "done").map(j => j.id).join();
+  if (done !== lastDone) { lastDone = done; loadSigned(); }
+  if (r.jobs.some(j => ["queued", "downloading", "signing"].includes(j.status))) pollTimer = setTimeout(pollJobs, 1500);
+}
+$("#clearJobs").onclick = async () => { await api("/api/sign/clear", { body: {} }); pollJobs(); };
+
+async function loadSigned() {
+  const r = await api("/api/signed");
+  if (!r.ok) return;
+  $("#signed").innerHTML = r.items.length ? r.items.map(s => `
+    <div class="row">
+      ${s.icon ? `<img src="${esc(s.icon)}" alt="">` : ""}
+      <div class="grow">
+        <div class="ellip">${esc(s.appName || s.sourceName)} <span class="muted small">${esc(s.version || "")}</span></div>
+        <div class="small muted ellip">${esc(s.bundleID || "")} · ${fmtSize(s.size)} · ${esc(s.certLabel || "")}</div>
+        <div class="actions">${linkButtons(s)}<button class="btn sm danger" data-delsigned="${esc(s.key)}">删除</button></div>
+      </div>
+    </div>`).join("") : `<div class="empty">暂无</div>`;
+}
+$("#signed").onclick = async e => {
+  const b = e.target.closest("[data-delsigned]"); if (!b) return;
+  if (!confirm("删除这个签好的文件？")) return;
+  const r = await api("/api/signed/" + encodeURIComponent(b.dataset.delsigned), { method: "DELETE" });
+  toast(r.ok ? "已删除" : r.error); loadSigned();
+};
+$("#refreshSigned").onclick = loadSigned;
+
+loadCerts().then(() => loadApps(true)); pollJobs(); loadSigned();
+</script>
+</body>
+</html>
