@@ -95,8 +95,9 @@
     <span id="toolInfo" class="muted small"></span>
     <span class="sp"></span>
     <span id="acct" class="muted small ellip"></span>
+    <select id="acctSel" class="small" title="切换 Apple ID" hidden></select>
     <button id="loginBtn" class="btn sm">登录 Apple ID</button>
-    <button id="logoutBtn" class="btn sm" hidden>退出</button>
+    <button id="logoutBtn" class="btn sm" hidden title="退出当前 Apple ID，其他账号不受影响">退出</button>
   </div>
 </header>
 
@@ -143,8 +144,8 @@
 <dialog id="loginDlg">
   <form method="dialog" id="loginForm">
     <div class="body">
-      <h2>登录 Apple ID</h2>
-      <div class="small muted">账号密码只会传给本机的 ipatool，凭据由 ipatool 保存在系统钥匙串中。</div>
+      <h2 id="loginTitle">登录 Apple ID</h2>
+      <div class="small muted">账号密码只会传给本机的 ipatool，凭据由 ipatool 保存在系统钥匙串中。可以添加多个 Apple ID，登录后会切换到这个账号；同一个 Apple ID 再登录一次就是重新登录。</div>
       <input type="email" id="email" placeholder="Apple ID 邮箱" autocomplete="username" required>
       <input type="password" id="password" placeholder="密码" autocomplete="current-password" required>
       <input type="text" id="code" placeholder="双重认证验证码（先留空点登录，收到后再填）" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
@@ -199,21 +200,46 @@ async function loadStatus() {
   $("#toolInfo").textContent = status.ipatool ? `ipatool ${status.version || ""}` : "";
   $("#dlDir").textContent = "保存位置：" + (status.downloadDir || "") +
     (status.alist && status.alist.enabled ? `；Alist 目录：${status.alist.dir}${status.alist.auto ? "（下载完自动上传）" : ""}` : "");
-  const acct = status.account;
-  $("#acct").textContent = acct ? `${acct.name || ""} ${acct.email}` : "未登录";
-  $("#loginBtn").hidden = !!acct;
-  $("#logoutBtn").hidden = !acct;
+  const acct = status.account, accounts = status.accounts || [];
+  const current = accounts.find(a => a.current);
+  // 账号下拉框：已登录的账号 + 「添加」
+  const sel = $("#acctSel");
+  sel.hidden = !accounts.length;
+  sel.innerHTML = accounts.map(a =>
+    `<option value="${esc(a.id)}" ${a.current ? "selected" : ""}>${esc(a.name ? a.name + " · " : "")}${esc(a.email)}</option>`).join("")
+    + `<option value="__add">＋ 添加 Apple ID…</option>`;
+  $("#acct").textContent = accounts.length ? "" : "未登录";
+  $("#loginBtn").hidden = accounts.length > 0;
+  $("#logoutBtn").hidden = !current;
   const n = $("#notice");
   if (!status.ipatool) {
     n.innerHTML = `<div class="notice warn">未找到 <b>ipatool</b>。请从 GitHub 下载 Windows 版 ipatool，把 <code>ipatool.exe</code> 放到 <code>server.py</code> 同目录后刷新页面。</div>`;
+  } else if (!acct && current) {
+    n.innerHTML = `<div class="notice warn">当前账号 ${esc(current.email)} 的登录已失效，请 <a href="#" id="nLogin">重新登录</a>。</div>`;
+    $("#nLogin").onclick = e => { e.preventDefault(); openLogin(current.email); };
   } else if (!acct) {
     n.innerHTML = `<div class="notice">搜索和下载需要先 <a href="#" id="nLogin">登录 Apple ID</a>。</div>`;
     $("#nLogin").onclick = e => { e.preventDefault(); openLogin(); };
   } else n.innerHTML = "";
 }
 
-function openLogin() { $("#loginMsg").textContent = ""; $("#loginDlg").showModal(); $("#email").focus(); }
-$("#loginBtn").onclick = openLogin;
+function openLogin(email) {
+  const relogin = typeof email === "string";
+  $("#loginTitle").textContent = relogin ? "重新登录 Apple ID" : (status.accounts || []).length ? "添加 Apple ID" : "登录 Apple ID";
+  $("#email").value = relogin ? email : "";
+  $("#password").value = ""; $("#code").value = "";
+  $("#loginMsg").textContent = "";
+  $("#loginDlg").showModal();
+  (relogin ? $("#password") : $("#email")).focus();
+}
+$("#loginBtn").onclick = () => openLogin();
+$("#acctSel").onchange = async e => {
+  const v = e.target.value;
+  if (v === "__add") { e.target.value = status.currentAccount; return openLogin(); }
+  const r = await api("/api/accounts/switch", { body: { id: v } });
+  toast(r.ok ? "已切换账号，之后的搜索和下载都用这个账号" : r.error);
+  loadStatus();
+};
 $("#loginCancel").onclick = () => $("#loginDlg").close();
 $("#loginForm").onsubmit = async e => {
   e.preventDefault();
@@ -229,8 +255,9 @@ $("#loginForm").onsubmit = async e => {
   if (r.needCode) $("#code").focus();
 };
 $("#logoutBtn").onclick = async () => {
-  if (!confirm("确定退出当前 Apple ID？")) return;
-  const r = await api("/api/logout", { body: {} });
+  const cur = (status.accounts || []).find(a => a.current);
+  if (!cur || !confirm(`退出并移除 ${cur.email}？其他账号不受影响。`)) return;
+  const r = await api("/api/logout", { body: { id: cur.id } });
   toast(r.ok ? "已退出" : r.error); loadStatus();
 };
 
@@ -312,6 +339,7 @@ async function pollJobs() {
       <div class="grow">
         <div class="ellip">${esc(j.name)}${j.displayVersion ? ` <span class="muted small">v${esc(j.displayVersion)}</span>` : ""}</div>
         <div class="small st-${j.status}">${st}${j.purchased ? "（已自动获取许可）" : ""}${j.status === "done" && j.finishedAt ? ` · 用时 ${Math.round(j.finishedAt - j.startedAt)} 秒` : ""}</div>
+        ${j.accountEmail && (status.accounts || []).length > 1 ? `<div class="small muted ellip">账号：${esc(j.accountEmail)}</div>` : ""}
         ${j.note ? `<div class="small muted">${esc(j.note)}</div>` : ""}
         ${j.error ? `<div class="small err">${esc(j.error)}</div>` : ""}
         ${prog}

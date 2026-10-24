@@ -4,7 +4,8 @@
 
 **功能**
 
-- 网页登录 Apple ID（支持双重认证），搜索 App，下载最新版或任意历史版本
+- 网页登录 Apple ID（支持双重认证、多个账号随时切换），搜索 App，下载最新版或任意历史版本
+- 历史版本按版本号或日期查找（如 14.8.40、2026-09）
 - 文件以「应用名_版本.ipa」命名，列表显示图标和版本
 - 下载完自动上传到 Alist（可选），可浏览 Alist 目录、用网盘直链下载
 - iPhone 一键安装：系统安装（itms-services，需要 HTTPS）或交给 TrollStore 安装
@@ -129,7 +130,9 @@ docker compose logs -f ipa-site
 
 | 路径 | 内容 |
 |---|---|
-| `.ipatool/` | ipatool 的 Apple ID 登录状态（已加密） |
+| `.ipatool/` | 第一个 Apple ID 的 ipatool 登录状态（已加密） |
+| `accounts/<id>/.ipatool/` | 后来添加的其他 Apple ID 的登录状态，每个账号一个目录 |
+| `accounts.json` | 账号列表和当前使用的账号 |
 | `.keychain-passphrase` | 解密上面登录状态的口令，首次启动自动生成。**删了就要重新登录 Apple ID，也不要外传** |
 | `.link-secret` | 安装链接的签名密钥，自动生成 |
 | `.version-cache.json` | 查过的历史版本号和发布日期（不会变，查一次就记住，删了只是要重新查） |

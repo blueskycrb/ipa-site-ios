@@ -212,9 +212,60 @@ threading.Thread(target=relay.serve_forever, daemon=True).start()
 RELAY_URL = f"http://127.0.0.1:{relay.server_address[1]}"
 
 
-def ipatool_env():
+# ---------------------------------------------------------------- 多账号
+#
+# ipatool 一次只记一个 Apple ID（登录状态存在 $HOME/.ipatool）。每个账号用自己的 HOME 运行 ipatool，
+# 登录状态就互不干扰。"default" 是原来的账号，沿用进程本身的 HOME，所以升级前登录的账号不用重新登录。
+
+DATA_DIR = PASSPHRASE_FILE.parent
+ACCOUNTS_FILE = DATA_DIR / "accounts.json"
+ACCOUNTS_DIR = DATA_DIR / "accounts"
+_accounts_lock = threading.RLock()
+
+
+def load_accounts():
+    try:
+        data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data.setdefault("current", "default")
+    data.setdefault("accounts", {}).setdefault("default", {})
+    if data["current"] not in data["accounts"]:
+        data["current"] = "default"
+    return data
+
+
+def save_accounts(data):
+    tmp = ACCOUNTS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, ACCOUNTS_FILE)
+
+
+def current_account():
+    return load_accounts()["current"]
+
+
+def account_email(acc_id):
+    return load_accounts()["accounts"].get(acc_id, {}).get("email")
+
+
+def account_list():
+    data = load_accounts()
+    return [{"id": i, "email": a["email"], "name": a.get("name"), "current": i == data["current"]}
+            for i, a in data["accounts"].items() if a.get("email")]
+
+
+def ipatool_env(account=None):
     env = dict(os.environ)
     env["HTTPS_PROXY"] = env["https_proxy"] = RELAY_URL
+    acc = account if account is not None else current_account()
+    if acc != "default":
+        home = ACCOUNTS_DIR / acc
+        home.mkdir(parents=True, exist_ok=True)
+        env["HOME"] = str(home)
+        env["HOMEDRIVE"], env["HOMEPATH"] = "", str(home)   # Windows 上 ipatool 用这两个变量找 HOME
+        env.pop("XDG_STATE_HOME", None)
+        env.pop("XDG_DATA_HOME", None)
     return env
 
 
@@ -256,12 +307,12 @@ def parse_output(stdout, stderr, returncode):
     return lines
 
 
-def run_ipatool(args, timeout=120):
-    """运行 ipatool 并返回解析后的 JSON 日志行列表。"""
+def run_ipatool(args, timeout=120, account=None):
+    """运行 ipatool 并返回解析后的 JSON 日志行列表；account 为空时用当前账号。"""
     try:
         proc = subprocess.run(
             ipatool_cmd(args), capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, creationflags=NO_WINDOW, env=ipatool_env(),
+            timeout=timeout, creationflags=NO_WINDOW, env=ipatool_env(account),
         )
     except subprocess.TimeoutExpired:
         raise IpatoolError("ipatool 执行超时")
@@ -278,11 +329,12 @@ class LoginSession:
 
     TTL = 10 * 60  # 等待验证码的最长时间
 
-    def __init__(self, email, password):
+    def __init__(self, email, password, account, is_new):
+        self.account, self.is_new = account, is_new
         self.proc = subprocess.Popen(
             ipatool_cmd(["auth", "login", "-e", email, "-p", password], interactive=True),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=NO_WINDOW,
-            env=ipatool_env(),
+            env=ipatool_env(account),
         )
         self.created = time.time()
         self.out, self.err = bytearray(), bytearray()
@@ -342,6 +394,67 @@ class LoginSession:
 
 pending_login = None
 login_lock = threading.Lock()
+
+
+def refresh_account(acc_id):
+    """用 auth info 读出账号的邮箱和名字并记到账号表里；没登录时返回 None。"""
+    try:
+        info = pick(run_ipatool(["auth", "info"], timeout=30, account=acc_id), "email")
+    except IpatoolError:
+        info = {}
+    with _accounts_lock:
+        data = load_accounts()
+        entry = data["accounts"].get(acc_id)
+        if entry is not None and info.get("email"):
+            if entry.get("email") != info["email"] or entry.get("name") != info.get("name"):
+                entry.update(email=info["email"], name=info.get("name"))
+                save_accounts(data)
+    return {"email": info["email"], "name": info.get("name")} if info.get("email") else None
+
+
+def pick_login_target(email, wanted):
+    """登录时决定用哪个账号目录：指定的 > 同邮箱的已有账号（重新登录）> 空着的 default > 新建。"""
+    data = load_accounts()
+    if wanted in data["accounts"]:
+        return wanted, False
+    for acc_id, a in data["accounts"].items():
+        if (a.get("email") or "").lower() == email.lower():
+            return acc_id, False
+    if not data["accounts"]["default"].get("email") and not refresh_account("default"):
+        return "default", False
+    return uuid.uuid4().hex[:8], True
+
+
+def finish_login(acc_id, info):
+    with _accounts_lock:
+        data = load_accounts()
+        data["accounts"][acc_id] = {"email": info.get("email"), "name": info.get("name"),
+                                    "addedAt": data["accounts"].get(acc_id, {}).get("addedAt") or time.time()}
+        data["current"] = acc_id
+        save_accounts(data)
+
+
+def drop_account_dir(acc_id):
+    if acc_id != "default":
+        shutil.rmtree(ACCOUNTS_DIR / acc_id, ignore_errors=True)
+
+
+def remove_account(acc_id):
+    """退出并删除账号；删的是当前账号时，切换到剩下的第一个账号。"""
+    try:
+        run_ipatool(["auth", "revoke"], timeout=30, account=acc_id)
+    except IpatoolError:
+        pass
+    with _accounts_lock:
+        data = load_accounts()
+        if acc_id == "default":
+            data["accounts"]["default"] = {}
+        else:
+            data["accounts"].pop(acc_id, None)
+        if data["current"] == acc_id:
+            data["current"] = next((i for i, a in data["accounts"].items() if a.get("email")), "default")
+        save_accounts(data)
+    drop_account_dir(acc_id)
 
 
 def pick(lines, key):
@@ -516,7 +629,7 @@ def run_download(job):
             pass
 
     try:
-        return run_ipatool(download_args(job, version_id), timeout=60 * 60)
+        return run_ipatool(download_args(job, version_id), timeout=60 * 60, account=job.get("account"))
     except IpatoolError as e:
         low = str(e).lower()
         # 许可、账号层面的错误换个下载方式也一样，不用再白等一次
@@ -526,7 +639,7 @@ def run_download(job):
             raise
         # 指定的版本 ID 不行时，退回 ipatool 默认方式再试一次
         job["note"] = f"按最新版本 ID 下载失败（{e}），已改用 ipatool 默认方式重试"
-        return run_ipatool(download_args(job, None), timeout=60 * 60)
+        return run_ipatool(download_args(job, None), timeout=60 * 60, account=job.get("account"))
 
 
 def explain_download_error(msg):
@@ -1021,8 +1134,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/login":
                 return self.api_login(data)
             if url.path == "/api/logout":
-                run_ipatool(["auth", "revoke"])
-                return self.send_json({"ok": True})
+                return self.api_logout(data)
+            if url.path == "/api/accounts/switch":
+                return self.api_switch_account(data)
             if url.path == "/api/purchase":
                 return self.api_purchase(data)
             if url.path == "/api/download":
@@ -1150,26 +1264,47 @@ class Handler(BaseHTTPRequestHandler):
                "account": None, "downloadDir": str(DOWNLOAD_DIR), "country": COUNTRY, "relay": RELAY_URL,
                "alist": {"enabled": alist_enabled(), "dir": ALIST_DIR, "auto": ALIST_AUTO_UPLOAD},
                "install": {"enabled": install_enabled(), "publicURL": PUBLIC_URL}}
+        acc = current_account()
+        out["currentAccount"] = acc
         if exe:
-            try:
-                info = pick(run_ipatool(["auth", "info"], timeout=30), "email")
-                if info:
-                    out["account"] = {"email": info.get("email"), "name": info.get("name")}
-            except IpatoolError:
-                pass
+            out["account"] = refresh_account(acc)
+        out["accounts"] = account_list()
         self.send_json(out)
+
+    def api_switch_account(self, d):
+        acc = d.get("id")
+        if acc not in {a["id"] for a in account_list()}:
+            return self.send_error_json("没有这个账号")
+        with _accounts_lock:
+            data = load_accounts()
+            data["current"] = acc
+            save_accounts(data)
+        self.send_json({"ok": True, "currentAccount": acc, "accounts": account_list()})
+
+    def api_logout(self, d):
+        acc = d.get("id") or current_account()
+        if acc not in load_accounts()["accounts"]:
+            return self.send_error_json("没有这个账号")
+        remove_account(acc)
+        self.send_json({"ok": True, "currentAccount": current_account(), "accounts": account_list()})
 
     def api_login(self, d):
         global pending_login
         email, password = (d.get("email") or "").strip(), d.get("password") or ""
         code = "".join((d.get("code") or "").split())
 
+        def abandon(s):
+            """登录没成功：结束进程；如果是为新账号临时建的目录，一并删掉。"""
+            s.kill()
+            if s.is_new:
+                drop_account_dir(s.account)
+
         with login_lock:
             if code:
                 sess, pending_login = pending_login, None
                 if not sess or not sess.alive():
                     if sess:
-                        sess.kill()
+                        abandon(sess)
                     return self.send_json({"ok": False, "restart": True,
                                            "error": "这次登录已失效（超过 10 分钟或网站重启过），请清空验证码重新登录"})
                 if len(code) != 6 or not code.isdigit():
@@ -1178,6 +1313,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     lines = sess.submit_code(code)
                 except IpatoolError as e:
+                    abandon(sess)
                     msg = str(e)
                     if "verification" in msg or "2FA" in msg:
                         msg = f"验证码未通过：{msg}"
@@ -1189,18 +1325,27 @@ class Handler(BaseHTTPRequestHandler):
                 if not email or not password:
                     return self.send_error_json("请输入 Apple ID 和密码")
                 if pending_login:
-                    pending_login.kill()
+                    abandon(pending_login)
                     pending_login = None
-                sess = LoginSession(email, password)
-                if sess.wait_for_prompt(timeout=300) == "code":
-                    pending_login = sess
-                    return self.send_json({"ok": False, "needCode": True,
-                                           "error": "需要双重认证：请在 Apple 设备上点「允许」，把显示的 6 位验证码填到下面，再点登录"})
-                lines = sess.result()
+                # 同一个 Apple ID 再登录会用回它原来的目录；新的 Apple ID 会新建一个账号
+                target, is_new = pick_login_target(email, d.get("account"))
+                sess = LoginSession(email, password, target, is_new)
+                try:
+                    if sess.wait_for_prompt(timeout=300) == "code":
+                        pending_login = sess
+                        return self.send_json({"ok": False, "needCode": True,
+                                               "error": "需要双重认证：请在 Apple 设备上点「允许」，把显示的 6 位验证码填到下面，再点登录"})
+                    lines = sess.result()
+                except IpatoolError:
+                    abandon(sess)
+                    raise
 
         info = pick(lines, "email")
         if info.get("success"):
-            return self.send_json({"ok": True, "account": {"email": info.get("email"), "name": info.get("name")}})
+            finish_login(sess.account, info)
+            return self.send_json({"ok": True, "account": {"email": info.get("email"), "name": info.get("name")},
+                                   "currentAccount": sess.account, "accounts": account_list()})
+        abandon(sess)
         self.send_error_json(" ".join(str(l.get("message", "")) for l in lines).strip() or "登录失败")
 
     def api_search(self, q):
@@ -1273,6 +1418,9 @@ class Handler(BaseHTTPRequestHandler):
             "platform": d.get("platform") if d.get("platform") in PLATFORMS else "",
             "country": d.get("country") or COUNTRY,
             "purchase": bool(d.get("purchase")),
+            # 记下发起时的账号：之后切换账号不影响这个任务
+            "account": current_account(),
+            "accountEmail": account_email(current_account()),
         }
         with jobs_lock:
             jobs[job["id"]] = job

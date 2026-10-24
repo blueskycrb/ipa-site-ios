@@ -35,11 +35,21 @@ struct InstallInfo: Decodable {
     let publicURL: String?
 }
 
+/// 服务器上登录过的一个 Apple ID
+struct AccountEntry: Decodable, Identifiable {
+    let id: String
+    let email: String
+    let name: String?
+    let current: Bool
+}
+
 struct ServerStatus: Decodable {
     let ok: Bool
     let ipatool: String?
     let version: String?
-    let account: Account?
+    let account: Account?              // 当前账号（登录失效时为空）
+    let accounts: [AccountEntry]?      // 所有账号（旧版服务器没有）
+    let currentAccount: String?
     let alist: AlistInfo?
     let install: InstallInfo?
 }
@@ -78,6 +88,7 @@ struct Job: Decodable, Identifiable {
     let startedAt: Double?
     let finishedAt: Double?
     let purchased: Bool?
+    let accountEmail: String?
 }
 
 struct UploadRecord: Decodable {
@@ -228,8 +239,14 @@ enum API {
                               allowNotOK: true)
     }
 
-    static func logout() async throws {
-        _ = try await send(Envelope.self, request("/api/logout", method: "POST", body: [:]))
+    /// 退出并移除一个账号（id 为空时是当前账号），其他账号不受影响
+    static func logout(_ id: String? = nil) async throws {
+        _ = try await send(Envelope.self, request("/api/logout", method: "POST", body: id.map { ["id": $0] } ?? [:]))
+    }
+
+    /// 切换当前账号：之后的搜索、下载都用这个账号
+    static func switchAccount(_ id: String) async throws {
+        _ = try await send(Envelope.self, request("/api/accounts/switch", method: "POST", body: ["id": id]))
     }
 
     static func search(_ q: String, platform: String, country: String, limit: Int = 20) async throws -> [AppItem] {

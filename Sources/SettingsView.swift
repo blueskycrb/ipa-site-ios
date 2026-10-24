@@ -17,6 +17,13 @@ struct SettingsView: View {
     @State private var needCode = false
     @State private var loginMessage: String?
     @State private var loggingIn = false
+    @State private var adding = false
+    @State private var removing: AccountEntry?
+
+    private var accounts: [AccountEntry] { status?.accounts ?? [] }
+
+    /// 需要显示登录表单：正在添加账号，或者当前账号没登录 / 登录失效
+    private var showLoginForm: Bool { adding || (status != nil && status?.account == nil) }
 
     var body: some View {
         NavigationStack {
@@ -41,10 +48,37 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    if let acc = status?.account {
+                    // 账号列表：点一下切换，左滑退出
+                    ForEach(accounts) { a in
+                        Button {
+                            Task { await switchTo(a) }
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(a.email).foregroundColor(.primary)
+                                    if let n = a.name, !n.trimmingCharacters(in: .whitespaces).isEmpty {
+                                        Text(n).font(.caption).foregroundColor(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                if a.current {
+                                    Image(systemName: "checkmark").foregroundColor(.accentColor)
+                                }
+                            }
+                        }
+                        .swipeActions {
+                            Button("退出", role: .destructive) { removing = a }
+                        }
+                    }
+                    if status?.accounts == nil, let acc = status?.account {
+                        // 旧版服务器只支持一个账号
                         LabeledContent("已登录", value: acc.email ?? "")
-                        Button("退出登录", role: .destructive) { Task { await logout() } }
-                    } else {
+                        Button("退出登录", role: .destructive) { Task { await logout(nil) } }
+                    }
+                    if let cur = accounts.first(where: { $0.current }), status?.account == nil {
+                        Text("\(cur.email) 的登录已失效，请在下面重新登录").font(.caption).foregroundColor(.orange)
+                    }
+                    if showLoginForm {
                         TextField("Apple ID 邮箱", text: $email)
                             .keyboardType(.emailAddress)
                             .textInputAutocapitalization(.never)
@@ -59,14 +93,26 @@ struct SettingsView: View {
                         }
                         Button(loginButtonTitle) { Task { await login() } }
                             .disabled(loggingIn || email.isEmpty || password.isEmpty)
-                        if let m = loginMessage {
-                            Text(m).font(.caption).foregroundColor(.secondary)
+                        if adding && !accounts.isEmpty {
+                            Button("取消添加") {
+                                adding = false
+                                resetLoginForm()
+                            }
+                            .foregroundColor(.secondary)
                         }
+                    } else if status?.accounts != nil {
+                        Button("添加 Apple ID") {
+                            resetLoginForm()
+                            adding = true
+                        }
+                    }
+                    if let m = loginMessage {
+                        Text(m).font(.caption).foregroundColor(.secondary)
                     }
                 } header: {
                     Text("Apple ID")
                 } footer: {
-                    Text("账号密码只发给你的服务器，由服务器上的 ipatool 登录 Apple。")
+                    Text("点账号切换，左滑退出。搜索、下载、查看历史版本都用当前账号（打勾的）。同一个 Apple ID 再登录一次就是重新登录。账号密码只发给你的服务器。")
                 }
 
                 Section("下载选项") {
@@ -136,6 +182,14 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .task { await check() }
+            .confirmationDialog("退出这个 Apple ID？",
+                                isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
+                                titleVisibility: .visible,
+                                presenting: removing) { a in
+                Button("退出并移除 \(a.email)", role: .destructive) { Task { await logout(a.id) } }
+            } message: { _ in
+                Text("服务器上这个账号的登录会被清除，其他账号不受影响。")
+            }
         }
     }
 
@@ -149,11 +203,34 @@ struct SettingsView: View {
         do {
             status = try await API.status()
             statusError = nil
+            // 当前账号登录失效时，预先填好它的邮箱，方便重新登录
+            if status?.account == nil, email.isEmpty, let cur = accounts.first(where: { $0.current }) {
+                email = cur.email
+            }
         } catch {
             status = nil
             statusError = error.localizedDescription
         }
         checking = false
+    }
+
+    private func resetLoginForm() {
+        email = ""
+        password = ""
+        code = ""
+        needCode = false
+        loginMessage = nil
+    }
+
+    private func switchTo(_ a: AccountEntry) async {
+        guard !a.current else { return }
+        do {
+            try await API.switchAccount(a.id)
+            loginMessage = "已切换到 \(a.email)，之后的搜索和下载都用这个账号"
+        } catch {
+            loginMessage = error.localizedDescription
+        }
+        await check()
     }
 
     private func login() async {
@@ -164,7 +241,9 @@ struct SettingsView: View {
                 password = ""
                 code = ""
                 needCode = false
-                loginMessage = "登录成功"
+                adding = false
+                loginMessage = "登录成功，已切换到 \(r.account?.email ?? email)"
+                email = ""
                 await check()
             } else {
                 loginMessage = r.error
@@ -180,9 +259,10 @@ struct SettingsView: View {
         loggingIn = false
     }
 
-    private func logout() async {
+    private func logout(_ id: String?) async {
         do {
-            try await API.logout()
+            try await API.logout(id)
+            loginMessage = "已退出"
         } catch {
             loginMessage = error.localizedDescription
         }

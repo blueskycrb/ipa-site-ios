@@ -5,6 +5,7 @@ struct JobsView: View {
     @State private var message: String?
     @State private var toast: String?
     @State private var installEnabled = false
+    @State private var showAccount = false   // 有多个账号时，每个任务显示用的是哪个账号
 
     var body: some View {
         NavigationStack {
@@ -16,7 +17,7 @@ struct JobsView: View {
                     Text("暂无任务").foregroundColor(.secondary)
                 }
                 ForEach(jobs) { job in
-                    JobRow(job: job, installEnabled: installEnabled, toast: $toast)
+                    JobRow(job: job, installEnabled: installEnabled, showAccount: showAccount, toast: $toast)
                 }
             }
             .navigationTitle("下载任务")
@@ -31,7 +32,9 @@ struct JobsView: View {
             .refreshable { await refresh() }
             .overlay(alignment: .bottom) { ToastView(text: $toast) }
             .task {
-                installEnabled = (try? await API.status())?.install?.enabled == true
+                let status = try? await API.status()
+                installEnabled = status?.install?.enabled == true
+                showAccount = (status?.accounts?.count ?? 0) > 1
                 // 页面显示期间每 1.5 秒刷新一次
                 while !Task.isCancelled {
                     await refresh()
@@ -54,6 +57,7 @@ struct JobsView: View {
 struct JobRow: View {
     let job: Job
     let installEnabled: Bool
+    let showAccount: Bool
     @Binding var toast: String?
 
     var body: some View {
@@ -63,6 +67,9 @@ struct JobRow: View {
                 Text(job.name ?? "")
                     + Text(job.displayVersion.map { "  \($0)" } ?? "").foregroundColor(.secondary)
                 Text(statusText).font(.caption).foregroundColor(statusColor)
+                if showAccount, let email = job.accountEmail {
+                    Text("账号：\(email)").font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                }
                 if job.status == "running" {
                     if let size = job.size, size > 0, let done = job.downloaded {
                         ProgressView(value: min(done / size, 1))
