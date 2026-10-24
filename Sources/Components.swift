@@ -96,7 +96,7 @@ struct SignButton: View {
             }
             certs = r.certs
             if certs.isEmpty {
-                toast = "还没有证书：请先在网页的「证书签名」页上传 p12 证书和描述文件"
+                toast = "还没有证书：请先在「设置 → 证书管理」导入证书"
             } else if certs.count == 1 {
                 await run(certs[0].id)
             } else {

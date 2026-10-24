@@ -159,12 +159,36 @@ struct CertInfo: Decodable, Identifiable {
     let allDevices: Bool?
     let devices: Int?
     let matchesProfile: Bool?
+    let profileName: String?
+    let appID: String?
+
+    /// 证书和描述文件里先到期的那个时间
+    var expires: Double? {
+        [certExpires, profileExpires].compactMap { $0 }.min()
+    }
 }
 
 struct CertsResponse: Decodable {
     let zsign: Bool?
     let installEnabled: Bool?
     let certs: [CertInfo]
+}
+
+/// 导入证书时每个 p12 的结果
+struct ImportResult: Decodable, Identifiable {
+    let id = UUID()
+    let file: String
+    let ok: Bool
+    let error: String?
+    let cert: CertInfo?
+
+    enum CodingKeys: String, CodingKey { case file, ok, error, cert }
+}
+
+private struct ImportResponse: Decodable {
+    let ok: Bool?
+    let error: String?
+    let results: [ImportResult]?
 }
 
 /// 证书签名任务
@@ -361,6 +385,25 @@ enum API {
 
     static func certs() async throws -> CertsResponse {
         try await send(CertsResponse.self, request("/api/certs"))
+    }
+
+    /// 导入证书：files 可以是证书 zip 包，也可以是 p12 + 描述文件；密码留空时服务器会从压缩包里的 txt 找
+    static func importCerts(_ files: [(name: String, data: Data)], password: String, label: String) async throws -> [ImportResult] {
+        let body: [String: Any] = [
+            "password": password,
+            "label": label,
+            "files": files.map { ["name": $0.name, "data": $0.data.base64EncodedString()] },
+        ]
+        let r = try await send(ImportResponse.self, request("/api/certs/import", method: "POST", body: body, timeout: 120),
+                               allowNotOK: true)
+        if let results = r.results, !results.isEmpty { return results }
+        if r.error == "Not found" { throw APIError(message: "服务器版本太旧，不支持导入证书，请先更新服务器") }
+        throw APIError(message: r.error ?? "导入失败")
+    }
+
+    /// 删除证书，用它签好的文件也会一起删除
+    static func deleteCert(_ id: String) async throws {
+        _ = try await send(Envelope.self, request("/api/certs/" + encode(id), method: "DELETE"))
     }
 
     /// 用证书签名一个 IPA；source 为 alist 或 server

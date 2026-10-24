@@ -145,8 +145,9 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink("证书管理（导入 / 删除）") { CertsView() }
                     if !API.base.isEmpty, let url = URL(string: API.base + "/sign") {
-                        Link("在网页上传 / 管理证书", destination: url)
+                        Link("打开网页版签名页", destination: url)
                     }
                 } header: {
                     Text("证书签名")
