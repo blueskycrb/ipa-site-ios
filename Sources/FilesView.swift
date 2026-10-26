@@ -6,6 +6,8 @@ struct FilesView: View {
     @State private var files: [RemoteFile] = []
     @State private var alist: AlistInfo?
     @State private var install: InstallInfo?
+    @State private var decrypt: DecryptInfo?
+    @State private var showAccount = false   // 有多个 Apple ID 时显示文件是哪个账号下载的
     @State private var message: String?
     @State private var toast: String?
     @State private var confirmDelete: RemoteFile?
@@ -77,6 +79,8 @@ struct FilesView: View {
                 let status = try? await API.status()
                 alist = status?.alist
                 install = status?.install
+                decrypt = status?.decrypt
+                showAccount = (status?.accounts?.count ?? 0) > 1
                 await loadSigned()
                 while !Task.isCancelled {
                     await refresh()
@@ -163,7 +167,10 @@ struct FilesView: View {
                         (Text(appName).font(.subheadline.weight(.semibold))
                             + Text(file.app?.version.map { "  v\($0)" } ?? "")
                             .font(.caption)
-                            .foregroundColor(.secondary))
+                            .foregroundColor(.secondary)
+                            + Text(decryptedTag(file.app))
+                            .font(.caption)
+                            .foregroundColor(.green))
                             .lineLimit(1)
                         Text(file.name).font(.caption2).foregroundColor(.secondary).lineLimit(1)
                     } else {
@@ -171,6 +178,9 @@ struct FilesView: View {
                     }
                     Text("\(fmtSize(file.size)) · \(Date(timeIntervalSince1970: file.mtime).formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption).foregroundColor(.secondary)
+                    if showAccount, let email = file.app?.accountEmail {
+                        Text("账号：\(email)").font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                    }
                 }
             }
             if let up = file.alist {
@@ -184,8 +194,8 @@ struct FilesView: View {
                                   phone: phone, toast: $toast)
                 InstallButton(name: file.name, systemAvailable: install?.enabled == true && file.app?.bundleID != nil,
                               toast: $toast)
-                if file.app?.uploaded == true {
-                    // 自己传上来的 IPA 不能系统安装，直接给签名按钮
+                if file.app?.uploaded == true || file.app?.decrypted == true {
+                    // 自己传上来的、解密出来的 IPA 不能系统安装，直接给签名按钮
                     SignButton(name: file.name, source: "server", onDone: { await loadSigned() }, toast: $toast)
                 }
                 if alist?.enabled == true {
@@ -204,8 +214,22 @@ struct FilesView: View {
                 .buttonStyle(.bordered)
             }
             .controlSize(.small)
+            if decrypt?.available == true, file.app?.decrypted != true, file.name.lowercased().hasSuffix(".ipa") {
+                // 单独一行，按钮多时上面一行放不下；解密好的文件出现在列表里，标着「已解密」
+                HStack {
+                    DecryptButton(name: file.name, onDone: { await refresh() }, toast: $toast)
+                    Text("解密后可以证书签名或用 TrollStore 安装").font(.caption2).foregroundColor(.secondary)
+                }
+                .controlSize(.small)
+            }
         }
         .padding(.vertical, 2)
+    }
+
+    /// 「  已解密 · US」，不是解密出来的文件时为空
+    private func decryptedTag(_ app: FileApp?) -> String {
+        guard app?.decrypted == true else { return "" }
+        return "  已解密" + (app?.decryptedWith.map { " · \($0)" } ?? "")
     }
 
     @ViewBuilder

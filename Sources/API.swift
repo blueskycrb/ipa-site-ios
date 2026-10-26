@@ -9,6 +9,7 @@ enum Keys {
     static let country = "country"
     static let platform = "platform"
     static let installMode = "installMode"   // "trollstore" 或 "system"
+    static let decryptCredential = "decryptCredential"   // 解密用哪个凭证："auto" 或凭证名称（US、CN…）
     static let defaultServer = ""   // 首次使用在「设置」里填写
 }
 
@@ -35,6 +36,14 @@ struct InstallInfo: Decodable {
     let publicURL: String?
 }
 
+/// 服务器的 FairPlay 解密功能（旧版服务器没有）
+struct DecryptInfo: Decodable {
+    let reason: String?           // 不为空时解密用不了，是原因（比如镜像没重新构建）
+    let credentials: [String]?    // 凭证名称（US、CN…）
+
+    var available: Bool { reason == nil }
+}
+
 /// 服务器上登录过的一个 Apple ID
 struct AccountEntry: Decodable, Identifiable {
     let id: String
@@ -52,6 +61,7 @@ struct ServerStatus: Decodable {
     let currentAccount: String?
     let alist: AlistInfo?
     let install: InstallInfo?
+    let decrypt: DecryptInfo?
 }
 
 struct AppItem: Decodable, Identifiable, Hashable {
@@ -106,6 +116,9 @@ struct FileApp: Decodable {
     let icon: String?
     let bundleID: String?
     let uploaded: Bool?   // 从手机 / 网页 / 分享扩展传上去的
+    let decrypted: Bool?          // 服务器解密出来的
+    let decryptedWith: String?    // 用哪个凭证解开的（US、CN…）
+    let accountEmail: String?     // 用哪个 Apple ID 下载的
 }
 
 /// 主 App 把服务器地址和访问密码通过剪贴板交给分享扩展（两者的设置不互通）
@@ -272,6 +285,40 @@ struct SignJob: Decodable, Identifiable {
     let downloadURL: String?
 }
 
+/// 解密用的 Apple ID 凭证（fairplay-decrypt 导出的 credential.bin），按地区命名
+struct DecryptCredential: Decodable, Identifiable {
+    let name: String
+    let addedAt: Double?
+    let email: String?    // 对应服务器上的哪个 Apple ID
+    var id: String { name }
+}
+
+struct DecryptCredentials: Decodable {
+    let reason: String?
+    let credentials: [DecryptCredential]
+}
+
+/// 解密任务
+struct DecryptJob: Decodable, Identifiable {
+    let id: String
+    let status: String          // queued / running / done / error
+    let name: String            // 服务器上的原文件
+    let credential: String?     // 发起时选的：auto 或凭证名称
+    let used: String?           // 实际用的凭证
+    let log: String?
+    let file: String?           // 解密后的文件
+    let message: String?
+    let error: String?
+    let appName: String?
+    let version: String?
+    let icon: String?
+    let accountEmail: String?
+    let startedAt: Double?
+    let finishedAt: Double?
+}
+
+private struct DecryptJobResponse: Decodable { let job: DecryptJob }
+private struct DecryptJobsResponse: Decodable { let jobs: [DecryptJob] }
 private struct SignJobResponse: Decodable { let job: SignJob }
 private struct SignJobsResponse: Decodable { let jobs: [SignJob] }
 private struct LinkResponse: Decodable { let url: String?; let size: Double? }
@@ -517,6 +564,56 @@ enum API {
             throw APIError(message: r?.error ?? "上传失败（HTTP \(code)）")
         }
         return name
+    }
+
+    // MARK: FairPlay 解密
+
+    /// 旧版服务器没有解密接口，会回 Not found
+    private static func needsDecrypt<T>(_ op: () async throws -> T) async throws -> T {
+        do {
+            return try await op()
+        } catch let e as APIError where e.message == "Not found" {
+            throw APIError(message: "服务器版本太旧，不支持解密，请先更新服务器")
+        }
+    }
+
+    /// 解密服务器上的原版 IPA。credential 为 auto 时先用下载它的 Apple ID 对应的凭证，没有就依次试
+    static func decrypt(_ name: String, credential: String) async throws -> DecryptJob {
+        try await needsDecrypt {
+            try await send(DecryptJobResponse.self,
+                           request("/api/decrypt", method: "POST", body: ["name": name, "credential": credential])).job
+        }
+    }
+
+    static func decryptJobs() async throws -> [DecryptJob] {
+        try await needsDecrypt { try await send(DecryptJobsResponse.self, request("/api/decrypt/jobs")).jobs }
+    }
+
+    static func clearDecryptJobs() async throws {
+        _ = try await send(Envelope.self, request("/api/decrypt/clear", method: "POST", body: [:]))
+    }
+
+    static func decryptCredentials() async throws -> DecryptCredentials {
+        try await needsDecrypt { try await send(DecryptCredentials.self, request("/api/decrypt/credentials")) }
+    }
+
+    /// 添加凭证（16 字节的 credential.bin），返回最新的凭证列表
+    static func addDecryptCredential(name: String, data: Data) async throws -> [DecryptCredential] {
+        let body = ["name": name, "data": data.base64EncodedString()]
+        return try await needsDecrypt {
+            try await send(DecryptCredentials.self, request("/api/decrypt/credentials", method: "POST", body: body)).credentials
+        }
+    }
+
+    /// 把凭证对应到服务器上的一个 Apple ID（email 为空时取消对应），返回最新的凭证列表
+    static func linkDecryptCredential(_ name: String, email: String) async throws -> [DecryptCredential] {
+        let body = ["name": name, "email": email]
+        return try await send(DecryptCredentials.self,
+                              request("/api/decrypt/credentials/link", method: "POST", body: body)).credentials
+    }
+
+    static func deleteDecryptCredential(_ name: String) async throws -> [DecryptCredential] {
+        try await send(DecryptCredentials.self, request("/api/decrypt/credentials/" + encode(name), method: "DELETE")).credentials
     }
 
     /// 返回安装链接：mode 为 trollstore 时是 apple-magnifier://install?url=…，否则是 itms-services://

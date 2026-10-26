@@ -167,6 +167,62 @@ func waitForSignJob(_ id: String, onProgress: (String) -> Void) async throws -> 
     }
 }
 
+/// 「解密」：服务器用 fairplay-decrypt 解密 App Store 原版 IPA，解密后的文件放在原文件旁边
+/// （应用名_版本_decrypted.ipa），可以证书签名或用 TrollStore 安装。
+/// 凭证在「设置 → 解密凭证」管理；默认「自动识别」：先用下载这个 IPA 的 Apple ID 对应的凭证。
+struct DecryptButton: View {
+    let name: String
+    var onDone: (() async -> Void)? = nil
+    @Binding var toast: String?
+    @AppStorage(Keys.decryptCredential) private var credential = "auto"
+    @State private var progress: String?
+
+    var body: some View {
+        if name.lowercased().hasSuffix(".ipa") {
+            Button(progress ?? "解密") { Task { await run() } }
+                .buttonStyle(.bordered)
+                .disabled(progress != nil)
+        }
+    }
+
+    private func run() async {
+        progress = "排队中…"
+        do {
+            let job = try await API.decrypt(name, credential: credential)
+            let j = try await waitForDecryptJob(job.id) { progress = $0 }
+            progress = nil
+            toast = "已用 \(j.used ?? "凭证") 解密：\(j.file ?? name)" + (j.message.map { "\n\($0)" } ?? "")
+            await onDone?()
+        } catch {
+            progress = nil
+            let msg = error.localizedDescription
+            // 服务器的提示是给网页看的，换成 App 里的位置
+            toast = msg.contains("还没有添加解密凭证") ? "还没有解密凭证：请先在「设置 → 解密凭证」添加" : msg
+        }
+    }
+}
+
+/// 等解密任务完成，过程中用 onProgress 报告进度
+@MainActor
+func waitForDecryptJob(_ id: String, onProgress: (String) -> Void) async throws -> DecryptJob {
+    while true {
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        guard let j = try await API.decryptJobs().first(where: { $0.id == id }) else {
+            throw APIError(message: "解密任务不见了，可能服务器重启过")
+        }
+        switch j.status {
+        case "running":
+            onProgress("解密中…")
+        case "done":
+            return j
+        case "error":
+            throw APIError(message: j.error ?? "解密失败")
+        default:
+            onProgress("排队中…")
+        }
+    }
+}
+
 /// 一个签好的 App：安装，或者证书过期后换新证书重签（同一团队的证书可以直接覆盖安装，数据保留）
 struct SignedAppRow: View {
     let item: SignedItem

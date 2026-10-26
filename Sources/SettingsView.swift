@@ -168,7 +168,22 @@ struct SettingsView: View {
                 } header: {
                     Text("证书签名")
                 } footer: {
-                    Text("在「Alist」页点「证书签名」，服务器用你上传的 p12 证书重签后自动弹出安装。适合改版 / 砸壳的 IPA；App Store 原版 IPA 是加密的，重签后会闪退，请用系统安装。")
+                    Text("在「Alist」页点「证书签名」，服务器用你上传的 p12 证书重签后自动弹出安装。适合改版 / 砸壳 / 解密后的 IPA；App Store 原版 IPA 是加密的，重签后会闪退，请先解密，或者用系统安装。")
+                }
+
+                if let d = status?.decrypt {
+                    Section {
+                        NavigationLink("解密凭证（\(credentialSummary(d))）") {
+                            DecryptCredentialsView()
+                        }
+                        if let r = d.reason {
+                            Text(r).font(.caption).foregroundColor(.orange)
+                        }
+                    } header: {
+                        Text("解密")
+                    } footer: {
+                        Text("App Store 原版 IPA 是加密的。下载完成后在「任务」页，或在「文件」页点「解密」，服务器用下载它的 Apple ID 对应的凭证解密，解密后的 IPA 可以证书签名或用 TrollStore 安装。")
+                    }
                 }
 
                 Section {
@@ -218,6 +233,12 @@ struct SettingsView: View {
                 Text("服务器上这个账号的登录会被清除，其他账号不受影响。")
             }
         }
+    }
+
+    /// 「US / CN」，还没有凭证时是「未添加」
+    private func credentialSummary(_ d: DecryptInfo) -> String {
+        let names = d.credentials ?? []
+        return names.isEmpty ? "未添加" : names.joined(separator: " / ")
     }
 
     private var loginButtonTitle: String {
