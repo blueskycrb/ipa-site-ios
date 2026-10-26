@@ -107,43 +107,140 @@ def find_ipatool():
 
 # ---------------------------------------------------------------- 本地中转代理
 #
-# ipatool 查版本号要访问 uclient-api.itunes.apple.com，但有些网络里本地 DNS 给出的
-# Apple IP 连不上，而另一个 IP（例如 Google DNS 给的）能连。这里在本机起一个只做
-# CONNECT 转发的小代理给 ipatool 用：访问 PINNED_HOSTS 时直连能用的 IP，其他请求照常
-# 交给原来的上游代理（如 Clash）或直连。只转发加密流量，证书校验仍由 ipatool 完成。
+# 有些网络里本地 DNS 给出的 Apple 服务器（多是运营商的 CDN 节点）时好时坏：有的连不上，有的能连上
+# 但 TLS 握手卡住不动，而且同一个 IP 这次行、下次不行，下载、登录、查版本号就跟着时好时坏。这里在本机
+# 起一个只做 CONNECT 转发的小代理给 ipatool（和网站自己访问 Apple 的请求）用：连 Apple 的服务器时，
+# 把客户端的第一个握手包（ClientHello）同时发给几个 IP，用最先回应的那个，其余的断开；本地 DNS 给的
+# 都没回应时，再同时问几家 DNS（阿里、腾讯、Google、Cloudflare，走 HTTPS），它们给的 CDN 节点往往
+# 不一样。最先回应的 IP 会记住，下次和本地 DNS 的结果一起试。其他请求照常交给原来的上游代理（如 Clash）
+# 或直连。只转发加密流量，握手和证书校验仍由 ipatool 自己完成。
+#
+# 注意：Apple 的每个 CDN 节点只服务一部分域名，所以候选 IP 只用这个域名自己的 DNS 结果，不跨域名借用。
 
-PINNED_HOSTS = {"uclient-api.itunes.apple.com"}
+APPLE_SUFFIXES = (".apple.com", ".mzstatic.com")
 UPSTREAM_PROXY = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
-_good_ip = {}
+RACE_WIDTH = 4            # 同时试几个 IP
+HELLO_REPLY_TIMEOUT = 4   # 发出 ClientHello 后等服务器回应的秒数
+DOH_SERVERS = (           # 国内的在前，不用代理也能连上
+    "https://dns.alidns.com/resolve?name={}&type=1",
+    "https://doh.pub/resolve?name={}&type=A",
+    "https://dns.google/resolve?name={}&type=A",
+    "https://cloudflare-dns.com/dns-query?name={}&type=A",
+)
+_good_ip = {}             # 域名 -> 上次最先回应的 IP
 
 
-def resolve_candidates(host):
-    ips = []
+def pinned(host):
+    """要挑 IP 的服务器。配置了上游代理时 Apple 的流量可能要靠它，只照旧处理查版本号的那一个。"""
+    host = host.lower()
+    if UPSTREAM_PROXY:
+        return host == "uclient-api.itunes.apple.com"
+    return host == "apple.com" or host.endswith(APPLE_SUFFIXES)
+
+
+def local_candidates(host):
     try:
-        ips += [ai[4][0] for ai in socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)]
+        return list(dict.fromkeys(ai[4][0] for ai in socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)))
     except OSError:
-        pass
-    for url in ("https://dns.google/resolve?name={}&type=A", "https://cloudflare-dns.com/dns-query?name={}&type=A"):
+        return []
+
+
+def doh_candidates(host):
+    """同时问几家 DNS，3 秒内回来的结果轮流合在一起（每家的前几个都能排上）。"""
+    found = {}
+
+    def ask(url):
         try:
             req = urllib.request.Request(url.format(host), headers={"accept": "application/dns-json"})
-            with urllib.request.urlopen(req, timeout=5) as r:
-                ips += [a["data"] for a in json.load(r).get("Answer", []) if a.get("type") == 1]
+            with urllib.request.urlopen(req, timeout=3) as r:
+                found[url] = [a["data"] for a in json.load(r).get("Answer", []) if a.get("type") == 1]
         except Exception:
             pass
-    return list(dict.fromkeys(ips))
+
+    threads = [threading.Thread(target=ask, args=(url,), daemon=True) for url in DOH_SERVERS]
+    for t in threads:
+        t.start()
+    deadline = time.time() + 3.5
+    for t in threads:
+        t.join(max(0, deadline - time.time()))
+    lists = [found.get(url, []) for url in DOH_SERVERS]
+    merged = [l[i] for i in range(max(map(len, lists), default=0)) for l in lists if i < len(l)]
+    return list(dict.fromkeys(merged))
 
 
-def connect_pinned(host, port):
-    cached = _good_ip.get(host)
-    candidates = ([cached] if cached else []) + [ip for ip in resolve_candidates(host) if ip != cached]
-    for ip in candidates:
+def read_tls_record(sock, data=b""):
+    """读客户端发来的第一个 TLS 记录（ClientHello）。不是 TLS，或 10 秒内没读完整时，返回已经读到的。"""
+    sock.settimeout(10)
+    try:
+        while not data or (data[0] == 0x16 and (len(data) < 5 or len(data) < 5 + int.from_bytes(data[3:5], "big"))):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        pass
+    sock.settimeout(None)
+    return data
+
+
+def race_hello(ips, port, hello):
+    """把 hello 同时发给这些 IP，返回最先回应的 (ip, 连接, 回应的第一段数据)；都没回应时返回 None。"""
+    results = queue.Queue()
+
+    def attempt(ip):
         try:
             sock = socket.create_connection((ip, port), timeout=4)
         except OSError:
-            continue
-        _good_ip[host] = ip
-        return sock
-    raise OSError(f"{host} 的所有 IP 都连不上：{', '.join(candidates) or '无'}")
+            results.put(None)
+            return
+        try:
+            sock.sendall(hello)
+            sock.settimeout(HELLO_REPLY_TIMEOUT)
+            first = sock.recv(65536)
+            # 回的得是 TLS 握手（不是告警），才算这个节点能用
+            if first and (hello[:1] != b"\x16" or first[:1] == b"\x16"):
+                results.put((ip, sock, first))
+                return
+        except OSError:
+            pass
+        sock.close()
+        results.put(None)
+
+    def close_late(n):
+        # 晚回应的连接用不上，等它们出结果后关掉
+        for _ in range(n):
+            late = results.get()
+            if late:
+                late[1].close()
+
+    for ip in ips:
+        threading.Thread(target=attempt, args=(ip,), daemon=True).start()
+    for left in range(len(ips) - 1, -1, -1):
+        r = results.get()
+        if r:
+            threading.Thread(target=close_late, args=(left,), daemon=True).start()
+            return r
+    return None
+
+
+def connect_racing(host, port, hello):
+    """连 Apple 的服务器：上次能用的 IP 和本地 DNS 给的一起试，都没回应再试其他 DNS 给的。
+    返回 (连接, 回应的第一段数据)，都不行时返回 None。"""
+    good = _good_ip.get(host)
+    first_try = list(dict.fromkeys(([good] if good else []) + local_candidates(host)))[:RACE_WIDTH]
+    won = race_hello(first_try, port, hello)
+    if not won:
+        extra = [ip for ip in doh_candidates(host) if ip not in first_try]
+        won = race_hello(extra[:RACE_WIDTH + 2], port, hello)
+        if won and won[0] != good:
+            print(f"Apple 服务器 {host}：{', '.join(first_try) or '本地 DNS'} 都没回应，改用 {won[0]}", flush=True)
+    if not won:
+        print(f"Apple 服务器 {host}：所有 IP 都没回应", flush=True)
+        _good_ip.pop(host, None)
+        return None
+    _good_ip[host] = won[0]
+    won[1].settimeout(None)
+    return won[1], won[2]
 
 
 def connect_upstream(host, port):
@@ -195,13 +292,30 @@ class RelayHandler(socketserver.BaseRequestHandler):
             client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
             return
         host, _, port = parts[1].rpartition(":")
-        try:
-            remote = connect_pinned(host, int(port)) if host.lower() in PINNED_HOSTS else connect_upstream(host, int(port))
-        except (OSError, ValueError):
-            client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+        if not port.isdigit():
+            client.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
             return
-        remote.settimeout(None)
-        client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        if pinned(host):
+            # 先答应客户端，拿到它的 ClientHello 再去找能回应的 IP
+            client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            hello = read_tls_record(client, head.split(b"\r\n\r\n", 1)[1])
+            won = connect_racing(host, int(port), hello) if hello else None
+            if not won:
+                return   # 断开连接，客户端会报连接失败
+            remote, first = won
+            try:
+                client.sendall(first)
+            except OSError:
+                remote.close()
+                return
+        else:
+            try:
+                remote = connect_upstream(host, int(port))
+            except OSError:
+                client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                return
+            remote.settimeout(None)
+            client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
         t = threading.Thread(target=pipe, args=(remote, client), daemon=True)
         t.start()
         pipe(client, remote)
@@ -217,6 +331,8 @@ class RelayServer(socketserver.ThreadingTCPServer):
 relay = RelayServer(("127.0.0.1", 0), RelayHandler)
 threading.Thread(target=relay.serve_forever, daemon=True).start()
 RELAY_URL = f"http://127.0.0.1:{relay.server_address[1]}"
+# 网站自己访问 Apple（补全图标、查最新版本号）也走中转，同样避开连不上的节点
+apple_opener = urllib.request.build_opener(urllib.request.ProxyHandler({"https": RELAY_URL}))
 
 
 # ---------------------------------------------------------------- 多账号
@@ -501,7 +617,7 @@ def itunes_lookup(ids, country):
     url = "https://itunes.apple.com/lookup?" + urllib.parse.urlencode(
         {"id": ",".join(str(i) for i in ids), "country": country, "entity": "software,macSoftware"})
     try:
-        with urllib.request.urlopen(url, timeout=10) as r:
+        with apple_opener.open(url, timeout=10) as r:
             data = json.load(r)
     except Exception:
         return {}
@@ -601,7 +717,7 @@ def catalog_latest_version_id(app_id, country, platform):
     country = re.sub(r"[^a-z]", "", str(country).lower())[:2] or COUNTRY
     url = f"https://apps.apple.com/api/apps/v1/catalog/{country}/apps/{int(app_id)}?platform={platform}"
     try:
-        with urllib.request.urlopen(url, timeout=10) as r:
+        with apple_opener.open(url, timeout=10) as r:
             item = json.load(r)["data"][0]
         return str(item["attributes"]["platformAttributes"]["ios"]["externalVersionId"])
     except Exception as e:

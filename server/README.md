@@ -206,7 +206,7 @@ docker compose logs -f ipa-site
 - **登录提示需要验证码**：先留空验证码点登录，Apple 设备上弹出 6 位验证码后填入再点登录（10 分钟内有效）。
 - **下载报「App Not Available」**：Apple 不允许这个 Apple ID 通过 ipatool 获取这个 App。在 iPhone 的 App Store 里用同一个 Apple ID 点一次「获取」（开始下载后可取消），之后就能下载。大多数免费 App 勾选「自动获取许可」即可，不用手动获取。
 - **下载速度时快时慢**：取决于当时分配到的 Apple 下载节点，和部署无关；可以同时下载几个提高总速度。
-- **历史版本 / 下载最新版报连不上 `uclient-api.itunes.apple.com`**：有些网络里这个 Apple 服务器的部分 IP 不通。程序内置的中转会自动换用能连通的 IP，一般无需处理。
+- **下载、查版本时报 `TLS handshake timeout`，或连不上 `*.itunes.apple.com`**：有些网络里本地 DNS 给的 Apple CDN 节点时好时坏（连不上，或者握手卡住）。程序内置的中转会把握手同时发给几个节点、用最先回应的那个；本地 DNS 给的都不行时，再问阿里、腾讯、Google、Cloudflare 的 DNS 找别的节点，并记住能用的，一般无需处理。日志里出现「Apple 服务器 xxx：… 都没回应，改用 …」就是它在起作用；「所有 IP 都没回应」说明这时确实连不上 Apple，稍后重试。配置了 `HTTPS_PROXY` 时，Apple 的流量交给你的代理，只有查版本号的服务器照旧由中转处理。
 - **Alist 上传报「资源配额不足」**：网盘空间或会员到期，和本程序无关。
 - **改了 .env 没生效**：要用 `docker compose up -d`，不是 `restart`。
 
