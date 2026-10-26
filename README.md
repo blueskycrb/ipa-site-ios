@@ -4,7 +4,7 @@
 
 | 部分 | 目录 | 说明 |
 |---|---|---|
-| **下载服务（服务端）** | [`server/`](server/) | 基于 [ipatool](https://github.com/majd/ipatool)，Docker 部署在自己的服务器上：登录 Apple ID、搜索、下载 IPA、上传 Alist、生成安装链接，自带网页 |
+| **下载服务（服务端）** | [`server/`](server/) | 基于 [ipatool](https://github.com/majd/ipatool)，Docker 部署在自己的服务器上：登录 Apple ID、搜索、下载 IPA、上传 Alist、生成安装链接、证书签名、解密，自带网页 |
 | **iPhone 客户端** | 仓库根目录 | SwiftUI App，连接上面的服务端使用；GitHub Actions 自动编译未签名 IPA |
 
 ```
@@ -13,27 +13,53 @@ iPhone 客户端 / 网页  ──HTTP(S)──▶  下载服务（Docker）  ─
                                          └──▶  Alist（可选，网盘直链下载 / 安装）
 ```
 
+### 仓库目录
+
+```
+ipa-site-ios/
+├── server/                        下载服务（部署时只用这个目录），每个文件的作用见 server/README.md
+├── Sources/                       iPhone 客户端代码
+│   ├── IPASiteApp.swift           App 入口、底部标签页、接收「用其他应用打开」传来的 IPA、启动时检查更新
+│   ├── API.swift                  和服务端通信的接口、数据模型（分享扩展也用这个文件）
+│   ├── SearchView.swift           「搜索」页
+│   ├── VersionsView.swift         历史版本列表、按版本号 / 日期查找
+│   ├── JobsView.swift             「任务」页：下载任务、解密任务
+│   ├── FilesView.swift            「文件」页：服务器上的文件、手机上的文件、证书签名的 App
+│   ├── AlistView.swift            「Alist」页
+│   ├── SettingsView.swift         「设置」页：服务器、Apple ID、安装方式、证书和解密凭证入口、检查更新
+│   ├── CertsView.swift            证书管理
+│   ├── DecryptCredentialsView.swift  解密凭证（添加、对应 Apple ID、选默认凭证）
+│   ├── Components.swift           公用控件：安装、证书签名、解密、存到手机按钮，提示条，文件选择器
+│   ├── PhoneDownloads.swift       存到手机的下载、手机上的文件
+│   └── Updater.swift              从 GitHub Releases 检查新版本
+├── ShareExtension/                分享扩展：在别的 App 里把 IPA / 证书分享到「IPA 下载」
+├── Resources/Assets.xcassets      App 图标
+├── project.yml                    XcodeGen 工程描述（App 版本号 MARKETING_VERSION 在这里）
+└── .github/workflows/build.yml    App 代码有改动时编译未签名 IPA 并发布 Release
+```
+
 ---
 
 ## 一、部署下载服务（Docker）
 
+**完整安装步骤、部署后每个目录放什么、更新、备份迁移、所有配置项，见 [server/README.md](server/README.md)。** 最简单的流程：
+
 ```bash
 git clone https://github.com/blueskycrb/ipa-site-ios.git
 cd ipa-site-ios/server
-cp .env.example .env      # 至少填 IPA_PASSWORD，其他按需
+cp .env.example .env      # 至少填 IPA_PASSWORD 和 IPA_MAC_ADDRESS，其他按需
 vi .env
 docker compose up -d --build
 ```
 
-浏览器打开 `http://服务器IP:8686`，登录 Apple ID 即可使用。
-
-**所有配置项（`.env`）的说明、外网访问、HTTPS、Alist、常见问题，见 [server/README.md](server/README.md)。** 配置模板 [server/.env.example](server/.env.example) 里每一项也都有注释。
+浏览器打开 `http://服务器IP:8686`，登录 Apple ID 即可使用。配置模板 [server/.env.example](server/.env.example) 里每一项都有注释。
 
 常用的几项：
 
 | 变量 | 作用 |
 |---|---|
 | `IPA_PASSWORD` | 网站访问密码（对外开放时必填） |
+| `IPA_MAC_ADDRESS` | 容器的 MAC 地址，ipatool 用它当设备标识（必填，生成方法见 `.env.example`） |
 | `IPA_COUNTRY` | Apple ID 所在地区，如 `cn` |
 | `ALIST_URL` / `ALIST_USERNAME` / `ALIST_PASSWORD` / `ALIST_DIR` | 上传到 Alist |
 | `ALIST_AUTO_UPLOAD` | `1` 下载完自动上传，`0` 手动 |

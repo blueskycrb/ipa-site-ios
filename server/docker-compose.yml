@@ -21,8 +21,8 @@ services:
       # 服务器需要走代理才能访问 Apple 时再打开，例如 http://192.168.1.2:7890
       # HTTPS_PROXY: ${HTTPS_PROXY:-}
     # ipatool 用网卡 MAC 生成“设备标识”。固定下来，重建容器后 Apple 仍认为是同一台设备，
-    # 不用重新登录。不要和局域网里其他设备重复。
-    mac_address: "02:42:ac:1f:5a:3c"
+    # 不用重新登录。每个部署用自己的一个，在 .env 里设置（生成方法见 .env.example）。
+    mac_address: ${IPA_MAC_ADDRESS:?请在 .env 里设置 IPA_MAC_ADDRESS，生成方法见 .env.example}
     ports:
       # IPv4 和 IPv6 各一行。用下面的 Caddy 时，在 .env 里设 IPA_BIND=127.0.0.1、IPA_BIND6=[::1]
       - "${IPA_BIND:-0.0.0.0}:8686:8686"

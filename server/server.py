@@ -112,8 +112,9 @@ def find_ipatool():
 # 起一个只做 CONNECT 转发的小代理给 ipatool（和网站自己访问 Apple 的请求）用：连 Apple 的服务器时，
 # 把客户端的第一个握手包（ClientHello）同时发给几个 IP，用最先回应的那个，其余的断开；本地 DNS 给的
 # 都没回应时，再同时问几家 DNS（阿里、腾讯、Google、Cloudflare，走 HTTPS），它们给的 CDN 节点往往
-# 不一样。最先回应的 IP 会记住，下次和本地 DNS 的结果一起试。其他请求照常交给原来的上游代理（如 Clash）
-# 或直连。只转发加密流量，握手和证书校验仍由 ipatool 自己完成。
+# 不一样。每次连接都按 DNS 的最新结果重新比，不固定用某个 IP：最近回应过的几个 IP 只是一起参加比较，
+# 10 分钟后自动忘掉。其他请求照常交给原来的上游代理（如 Clash）或直连。只转发加密流量，握手和证书
+# 校验仍由 ipatool 自己完成。
 #
 # 注意：Apple 的每个 CDN 节点只服务一部分域名，所以候选 IP 只用这个域名自己的 DNS 结果，不跨域名借用。
 
@@ -127,7 +128,10 @@ DOH_SERVERS = (           # 国内的在前，不用代理也能连上
     "https://dns.google/resolve?name={}&type=A",
     "https://cloudflare-dns.com/dns-query?name={}&type=A",
 )
-_good_ip = {}             # 域名 -> 上次最先回应的 IP
+GOOD_IP_TTL = 600         # 回应过的 IP 记多久（秒）
+GOOD_IP_KEEP = 3          # 每个域名最多记几个
+_good_ips = {}            # 域名 -> {IP: 最近一次最先回应的时间}
+_good_ips_lock = threading.Lock()
 
 
 def pinned(host):
@@ -166,6 +170,23 @@ def doh_candidates(host):
     lists = [found.get(url, []) for url in DOH_SERVERS]
     merged = [l[i] for i in range(max(map(len, lists), default=0)) for l in lists if i < len(l)]
     return list(dict.fromkeys(merged))
+
+
+def remembered(host):
+    """最近最先回应过、还没过期的 IP，最近的在前。"""
+    now = time.time()
+    with _good_ips_lock:
+        ips = {ip: t for ip, t in _good_ips.get(host, {}).items() if now - t < GOOD_IP_TTL}
+        _good_ips[host] = ips
+    return sorted(ips, key=ips.get, reverse=True)
+
+
+def remember(host, ip):
+    with _good_ips_lock:
+        ips = _good_ips.setdefault(host, {})
+        ips[ip] = time.time()
+        for old in sorted(ips, key=ips.get)[:-GOOD_IP_KEEP]:
+            del ips[old]
 
 
 def read_tls_record(sock, data=b""):
@@ -224,21 +245,22 @@ def race_hello(ips, port, hello):
 
 
 def connect_racing(host, port, hello):
-    """连 Apple 的服务器：上次能用的 IP 和本地 DNS 给的一起试，都没回应再试其他 DNS 给的。
+    """连 Apple 的服务器：本地 DNS 的最新结果和最近回应过的 IP 一起比，都没回应再问其他 DNS。
     返回 (连接, 回应的第一段数据)，都不行时返回 None。"""
-    good = _good_ip.get(host)
-    first_try = list(dict.fromkeys(([good] if good else []) + local_candidates(host)))[:RACE_WIDTH]
+    local = local_candidates(host)[:RACE_WIDTH]
+    first_try = list(dict.fromkeys(local + remembered(host)))
     won = race_hello(first_try, port, hello)
     if not won:
+        with _good_ips_lock:
+            _good_ips.pop(host, None)   # 刚才都没回应，记着的也不用再试了
         extra = [ip for ip in doh_candidates(host) if ip not in first_try]
         won = race_hello(extra[:RACE_WIDTH + 2], port, hello)
-        if won and won[0] != good:
+        if won:
             print(f"Apple 服务器 {host}：{', '.join(first_try) or '本地 DNS'} 都没回应，改用 {won[0]}", flush=True)
     if not won:
         print(f"Apple 服务器 {host}：所有 IP 都没回应", flush=True)
-        _good_ip.pop(host, None)
         return None
-    _good_ip[host] = won[0]
+    remember(host, won[0])
     won[1].settimeout(None)
     return won[1], won[2]
 
