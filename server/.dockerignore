@@ -7,3 +7,4 @@ downloads/
 __pycache__/
 *.pyc
 start.bat
+fairplay/

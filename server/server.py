@@ -13,6 +13,7 @@ IPA 下载站：一个包装 ipatool 命令行的本地网站（仅用 Python �
     IPA_ALLOW_NO_PASSWORD  设为 1 时允许不设访问密码对外监听（仅限可信内网）
     IPA_PASSPHRASE_FILE  钥匙串口令文件位置（默认 ./.keychain-passphrase）
     IPATOOL_KEYCHAIN_PASSPHRASE  直接指定钥匙串口令（优先于口令文件）
+    FAIRPLAY_DIR         fairplay-decrypt 的 decrypt.py / core.py 所在目录（默认 ./fairplay）
 """
 
 import base64
@@ -28,7 +29,9 @@ import re
 import shutil
 import socket
 import socketserver
+import struct
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -1468,6 +1471,246 @@ def signed_links(key, host):
     }
 
 
+# ---------------------------------------------------------------- FairPlay 解密
+#
+# App Store 原版 IPA 的主程序是 FairPlay 加密的，重签后会闪退。用 fairplay-decrypt
+# （https://github.com/EthanArbuckle/fairplay-decrypt）加上从越狱设备导出的 16 字节账号凭证，
+# 可以在服务器上离线解密，解密后的 IPA 能证书签名或用 TrollStore 安装。每个 Apple ID 一个凭证，
+# 按地区命名（US.bin、CN.bin）；「自动识别」会依次试每个凭证，凭证不对时很快就失败。
+# 解密脚本依赖 cryptography，在子进程里运行，网站本身仍只用标准库。
+
+FAIRPLAY_DIR = Path(os.environ.get("FAIRPLAY_DIR", BASE_DIR / "fairplay"))
+FAIRPLAY_CRED_DIR = DATA_DIR / "fairplay"
+DECRYPT_WORK_DIR = DOWNLOAD_DIR / ".decrypt"   # 和下载目录同一块盘，解密完直接改名移过去
+CRED_NAME = re.compile(r"[A-Za-z0-9_-]{1,32}")
+shutil.rmtree(DECRYPT_WORK_DIR, ignore_errors=True)
+
+decrypt_jobs = {}
+decrypt_jobs_lock = threading.Lock()
+decrypt_queue = queue.Queue()
+
+WRONG_ACCOUNT = "credential does not decode this SINF priv record"
+# decrypt.py 的常见报错，换成说明怎么办的中文
+DECRYPT_HINTS = {
+    WRONG_ACCOUNT: "这个凭证解不开：IPA 不是这个凭证对应的 Apple ID 下载的",
+    "no encrypted arm64 binaries with supported SINF/SUPF": "没找到需要解密的 arm64 程序（可能已经解密过，或授权文件格式不支持）",
+    "File is not a zip file": "不是有效的 IPA 文件",
+    "credential must contain exactly 16 bytes": "凭证文件不是 16 字节，请重新添加",
+    "Operation not permitted": "下载目录所在的磁盘不支持硬链接（exFAT / FAT32），请把数据目录放到 ext4、btrfs 或 NTFS 上",
+}
+
+
+def decrypt_unavailable():
+    """解密功能用不了时返回原因，能用时返回 None。"""
+    if not (FAIRPLAY_DIR / "decrypt.py").is_file():
+        return f"没有找到 fairplay-decrypt 的 decrypt.py（{FAIRPLAY_DIR}），请用最新的 Dockerfile 重新构建镜像"
+    import importlib.util
+    if importlib.util.find_spec("cryptography") is None:
+        return "Python 缺少 cryptography 库：请用最新的 Dockerfile 重新构建镜像，或者 pip install cryptography"
+    return None
+
+
+def fairplay_credentials():
+    if not FAIRPLAY_CRED_DIR.is_dir():
+        return []
+    return [{"name": p.stem, "addedAt": p.stat().st_mtime}
+            for p in sorted(FAIRPLAY_CRED_DIR.glob("*.bin")) if CRED_NAME.fullmatch(p.stem)]
+
+
+def add_fairplay_credential(name, data):
+    name = (name or "").strip().upper()
+    if not CRED_NAME.fullmatch(name):
+        raise IpatoolError("名称只能用字母、数字、- 和 _，建议用地区，例如 US、CN")
+    if len(data) != 16:
+        raise IpatoolError(f"凭证文件应该正好 16 字节，这个有 {len(data)} 字节，可能选错文件了")
+    for c in fairplay_credentials():
+        if c["name"] != name and (FAIRPLAY_CRED_DIR / f"{c['name']}.bin").read_bytes() == data:
+            raise IpatoolError(f"这个凭证已经添加过了，名称是 {c['name']}")
+    FAIRPLAY_CRED_DIR.mkdir(parents=True, exist_ok=True)
+    path = FAIRPLAY_CRED_DIR / f"{name}.bin"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(data)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return name
+
+
+def delete_fairplay_credential(name):
+    if not CRED_NAME.fullmatch(name or ""):
+        raise IpatoolError("凭证名称无效")
+    (FAIRPLAY_CRED_DIR / f"{name}.bin").unlink(missing_ok=True)
+
+
+def macho_cryptid(data):
+    """arm64 切片的 cryptid（1 = 加密，0 = 没加密）；不是 arm64 Mach-O 或没有加密信息时返回 None。"""
+    magic = struct.unpack(">I", data[:4])[0]
+    if magic in (0xCAFEBABE, 0xCAFEBABF):   # 多架构（FAT）
+        count, wide = struct.unpack(">I", data[4:8])[0], magic == 0xCAFEBABF
+        for i in range(min(count, 16)):
+            if wide:
+                cpu, _, offset, size, _, _ = struct.unpack(">iiQQII", data[8 + i * 32:40 + i * 32])
+            else:
+                cpu, _, offset, size, _ = struct.unpack(">iiIII", data[8 + i * 20:28 + i * 20])
+            if cpu == 0x0100000C:
+                return macho_cryptid(data[offset:offset + size])
+        return None
+    if data[:4] != b"\xcf\xfa\xed\xfe" or struct.unpack("<i", data[4:8])[0] != 0x0100000C:
+        return None
+    ncmds, offset = struct.unpack("<I", data[16:20])[0], 32
+    for _ in range(ncmds):
+        cmd, size = struct.unpack("<II", data[offset:offset + 8])
+        if cmd == 0x2C:   # LC_ENCRYPTION_INFO_64
+            return struct.unpack("<I", data[offset + 16:offset + 20])[0]
+        offset += size
+    return None
+
+
+def fairplay_precheck(path):
+    """先看一眼：没有 SC_Info 授权文件（不是 App Store 原版）或主程序本来就没加密时，直接说清楚。"""
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        if any("/SC_Info/" in n and n.endswith(".supf") for n in names):
+            return
+        cryptid = None
+        for n in names:
+            parts = n.split("/")
+            if len(parts) == 3 and parts[0] == "Payload" and parts[1].endswith(".app") and parts[2] == "Info.plist":
+                exe = plistlib.loads(z.read(n)).get("CFBundleExecutable")
+                try:
+                    cryptid = macho_cryptid(z.read(f"Payload/{parts[1]}/{exe}"))
+                except (KeyError, struct.error):
+                    pass
+                break
+    if cryptid == 0:
+        raise IpatoolError("这个 IPA 已经是解密过的（主程序没有加密），不用再解密，可以直接签名或用 TrollStore 安装")
+    raise IpatoolError("IPA 里没有 SC_Info 授权文件（.supf），没法解密：只能解密本站从 App Store 下载的原版 IPA")
+
+
+def explain_decrypt_error(lines):
+    if not lines:
+        return "解密失败，decrypt.py 没有输出"
+    raw = re.sub(r"^(?:decrypt\.py: error|[\w.]+): ", "", lines[-1])
+    for needle, hint in DECRYPT_HINTS.items():
+        if needle in raw:
+            return f"{hint}（{raw}）"
+    return raw
+
+
+def run_decrypt_script(job, cred, src, out):
+    """用一个凭证跑一次 decrypt.py，返回 (成功与否, 输出行)。"""
+    lines = []
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(FAIRPLAY_DIR / "decrypt.py"), str(src), str(out),
+         "--credential", str(FAIRPLAY_CRED_DIR / f"{cred}.bin")],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+        creationflags=NO_WINDOW)
+    for line in proc.stdout:
+        if line := line.strip():
+            lines.append(line)
+            job["log"] = f"{cred}：{line}"
+    return proc.wait() == 0 and out.is_file(), lines
+
+
+def run_decrypt(job):
+    reason = decrypt_unavailable()
+    if reason:
+        raise IpatoolError(reason)
+    src = DOWNLOAD_DIR / job["name"]
+    if not src.is_file():
+        raise IpatoolError("服务器上已经没有这个文件了")
+    creds = [c["name"] for c in fairplay_credentials()]
+    candidates = creds if job["credential"] == "auto" else [c for c in creds if c == job["credential"]]
+    if not candidates:
+        raise IpatoolError(f"没有 {job['credential']} 这个凭证" if creds else "还没有添加解密凭证")
+    try:
+        fairplay_precheck(src)
+    except zipfile.BadZipFile:
+        raise IpatoolError("不是有效的 IPA 文件")
+    work = DECRYPT_WORK_DIR / job["id"]
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        tried, ok, lines = [], False, []
+        for cred in candidates:
+            tried.append(cred)
+            job["log"] = f"用 {cred} 凭证解密…"
+            ok, lines = run_decrypt_script(job, cred, src, work / f"{cred}.ipa")
+            # 只有「凭证不对」才值得换下一个凭证，其他错误换了也一样
+            if ok or not (lines and WRONG_ACCOUNT in lines[-1]):
+                break
+        if not ok:
+            if len(tried) > 1 and lines and WRONG_ACCOUNT in lines[-1]:
+                raise IpatoolError(f"{'、'.join(tried)} 都解不开：这个 IPA 不是这些凭证对应的 Apple ID 下载的")
+            job["used"] = tried[-1]
+            raise IpatoolError(explain_decrypt_error(lines))
+        cred = tried[-1]
+        target = f"{src.stem}_decrypted.ipa"
+        with meta_lock:
+            os.replace(work / f"{cred}.ipa", DOWNLOAD_DIR / target)
+            meta = load_meta()
+            app = meta.get(job["name"]) or {}
+            if not app.get("name"):
+                info = ipa_info(DOWNLOAD_DIR / target)
+                app = {"name": info["appName"], "version": info["version"]}
+            # 不记 bundleID：解密后 Apple 的签名就失效了，不能「系统安装」，要签名或 TrollStore 安装
+            meta[target] = {"name": app.get("name"), "version": app.get("version"), "icon": app.get("icon"),
+                            "decrypted": True, "decryptedWith": cred, "decryptedFrom": job["name"]}
+            save_meta(meta)
+        count = re.search(r"decrypted-binaries=(\d+)", lines[-1]) if lines else None
+        job.update(used=cred, file=target, message=f"已解密 {count.group(1)} 个程序" if count else "完成")
+        if ALIST_AUTO_UPLOAD and alist_enabled():
+            enqueue_alist(target)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def enqueue_decrypt(name, credential):
+    check_plain_name(name)
+    if not name.lower().endswith(".ipa"):
+        raise IpatoolError("只能解密 .ipa 文件")
+    if not (DOWNLOAD_DIR / name).is_file():
+        raise IpatoolError("服务器上没有这个文件")
+    app = load_meta().get(name) or {}
+    if app.get("decrypted"):
+        raise IpatoolError("这个文件已经是解密后的了")
+    reason = decrypt_unavailable()
+    if reason:
+        raise IpatoolError(reason)
+    creds = [c["name"] for c in fairplay_credentials()]
+    if not creds:
+        raise IpatoolError("还没有添加解密凭证：点右上角「解密凭证」添加")
+    credential = credential or "auto"
+    if credential != "auto" and credential not in creds:
+        raise IpatoolError(f"没有 {credential} 这个凭证")
+    with decrypt_jobs_lock:
+        for j in decrypt_jobs.values():
+            if j["name"] == name and j["status"] in ("queued", "running"):
+                return j
+        job = {"id": uuid.uuid4().hex[:10], "status": "queued", "name": name, "credential": credential,
+               "used": None, "createdAt": time.time(), "log": "", "file": None, "message": None, "error": None,
+               "appName": app.get("name"), "version": app.get("version"), "icon": app.get("icon")}
+        decrypt_jobs[job["id"]] = job
+    decrypt_queue.put(job["id"])
+    return job
+
+
+def decrypt_worker():
+    # 一次只解一个：decrypt.py 会把整个主程序读进内存
+    while True:
+        job_id = decrypt_queue.get()
+        job = decrypt_jobs[job_id]
+        job["status"], job["startedAt"] = "running", time.time()
+        try:
+            run_decrypt(job)
+            job["status"] = "done"
+        except (IpatoolError, OSError, zipfile.BadZipFile) as e:
+            job["status"], job["error"] = "error", str(e)
+        job["log"], job["finishedAt"] = "", time.time()
+        decrypt_queue.task_done()
+
+
+threading.Thread(target=decrypt_worker, daemon=True).start()
+
+
 # ---------------------------------------------------------------- HTTP
 
 class Handler(BaseHTTPRequestHandler):
@@ -1549,6 +1792,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_sign_jobs()
             if url.path == "/api/signed":
                 return self.api_signed()
+            if url.path == "/api/decrypt/credentials":
+                return self.send_json({"ok": True, "reason": decrypt_unavailable(), "credentials": fairplay_credentials()})
+            if url.path == "/api/decrypt/jobs":
+                with decrypt_jobs_lock:
+                    out = sorted((dict(j) for j in decrypt_jobs.values()), key=lambda j: j["createdAt"], reverse=True)
+                return self.send_json({"ok": True, "jobs": out})
             if url.path == "/api/status":
                 return self.api_status()
             if url.path == "/api/search":
@@ -1609,6 +1858,21 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/signed/resign":
                 job = enqueue_resign(data.get("key") or "", data.get("cert") or "")
                 return self.send_json({"ok": True, "job": job})
+            if url.path == "/api/decrypt":
+                job = enqueue_decrypt(data.get("name") or "", data.get("credential") or "auto")
+                return self.send_json({"ok": True, "job": job})
+            if url.path == "/api/decrypt/credentials":
+                try:
+                    blob = base64.b64decode(data.get("data") or "", validate=True)
+                except ValueError:
+                    return self.send_error_json("文件内容无效")
+                name = add_fairplay_credential(data.get("name"), blob)
+                return self.send_json({"ok": True, "name": name, "credentials": fairplay_credentials()})
+            if url.path == "/api/decrypt/clear":
+                with decrypt_jobs_lock:
+                    for k in [k for k, j in decrypt_jobs.items() if j["status"] in ("done", "error")]:
+                        del decrypt_jobs[k]
+                return self.send_json({"ok": True})
             if url.path == "/api/sign/clear":
                 with sign_jobs_lock:
                     for k in [k for k, j in sign_jobs.items() if j["status"] in ("done", "error")]:
@@ -1694,6 +1958,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path.startswith("/api/certs/"):
                 delete_cert(url.path[len("/api/certs/"):])
                 return self.send_json({"ok": True})
+            if url.path.startswith("/api/decrypt/credentials/"):
+                delete_fairplay_credential(urllib.parse.unquote(url.path[len("/api/decrypt/credentials/"):]))
+                return self.send_json({"ok": True, "credentials": fairplay_credentials()})
             if url.path.startswith("/api/signed/"):
                 key = urllib.parse.unquote(url.path[len("/api/signed/"):])
                 signed_path_of(key).unlink(missing_ok=True)
@@ -1876,7 +2143,8 @@ class Handler(BaseHTTPRequestHandler):
         out = {"ok": True, "ipatool": exe, "version": ipatool_version() if exe else None,
                "account": None, "downloadDir": str(DOWNLOAD_DIR), "country": COUNTRY, "relay": RELAY_URL,
                "alist": {"enabled": alist_enabled(), "dir": ALIST_DIR, "auto": ALIST_AUTO_UPLOAD},
-               "install": {"enabled": install_enabled(), "publicURL": PUBLIC_URL}}
+               "install": {"enabled": install_enabled(), "publicURL": PUBLIC_URL},
+               "decrypt": {"reason": decrypt_unavailable(), "credentials": [c["name"] for c in fairplay_credentials()]}}
         acc = current_account()
         out["currentAccount"] = acc
         if exe:

@@ -10,3 +10,4 @@ ipatool.exe
 bin/
 __pycache__/
 *.pyc
+fairplay/

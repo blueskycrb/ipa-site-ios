@@ -10,6 +10,7 @@
 - 下载完自动上传到 Alist（可选），可浏览 Alist 目录、用网盘直链下载
 - iPhone 一键安装：系统安装（itms-services，需要 HTTPS）或交给 TrollStore 安装
 - 证书签名：上传自己的 p12 证书 + 描述文件，选 Alist / 服务器上的 IPA 用 zsign 重签后安装（网页 `/sign`）
+- 解密：用 [fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt) 和 Apple ID 凭证离线解密 App Store 原版 IPA，多个凭证按地区（US、CN…）管理，可自动识别
 - 访问密码、IPv4 / IPv6、多任务并行下载
 
 ---
@@ -141,9 +142,31 @@ docker compose logs -f ipa-site
 
 注意：
 
-- App Store 原版 IPA 是加密的，重签后打开会闪退；原版请用「系统安装」。证书签名适合改版 / 砸壳的 IPA。
+- App Store 原版 IPA 是加密的，重签后打开会闪退；原版请用「系统安装」，或者先[解密](#解密-app-store-原版-ipa)再签名。证书签名适合改版 / 砸壳 / 解密后的 IPA。
 - 个人 / 开发者证书需要描述文件里包含手机的 UDID；企业证书不需要，但可能被苹果吊销（掉签）。
 - 证书和密码保存在数据目录的 `certs/` 里，只在你的服务器上。
+
+---
+
+## 解密 App Store 原版 IPA
+
+本站下载的原版 IPA 主程序是 FairPlay 加密的。用 [fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt) 加上下载它的 Apple ID 的凭证，可以直接在服务器上离线解密，解密后的 IPA 能证书签名、交给 TrollStore 安装，或拿去分析。
+
+1. **准备凭证**：凭证是 fairplay-decrypt 从越狱设备导出的 16 字节 `credential.bin`，每个 Apple ID 一个（导出方法见 fairplay-decrypt 的 credential-retrieval）。
+2. **添加凭证**：网页右上角「解密凭证」，名称建议用 Apple ID 的地区（US、CN…），选 `credential.bin` 后点「添加」。文件名本身是 `US.bin` 这样时会自动填名称。
+3. **解密**：在「已下载文件」里点原版 IPA 的「解密」。有多个凭证时，可以在「解密凭证」里选默认用哪个：
+   - **自动识别**：依次试每个凭证，直到有一个能解开。凭证不对时很快就失败，所以基本不慢；
+   - 也可以固定用 US / CN。
+4. 解密完成后，同目录多出一个「应用名_版本_decrypted.ipa」，标着「已解密 · US」。
+
+说明：
+
+- 只能解密本站（或其他 ipatool 类工具）从 App Store 下载的原版 IPA：里面要有 `SC_Info` 授权文件。第三方网站下载的砸壳包已经是解密过的，网站会直接提示不用再解密。
+- IPA 必须是凭证对应的 Apple ID 下载的。国区 App 用 CN 账号下载，就要用 CN 凭证解。
+- 解密后的 IPA 没有 Apple 的签名，不能「系统安装」，要证书签名或用 TrollStore 安装。
+- 一次只解一个（解密时要把主程序读进内存），其余排队。
+- 解密脚本在构建镜像时从 GitHub 下载（固定版本），要用新版本：`docker compose build --build-arg FAIRPLAY_COMMIT=提交号`。
+- 数据目录要放在支持硬链接的磁盘上（ext4、btrfs、NTFS 都行，exFAT / FAT32 不行），用默认的 Docker 卷不用管。
 
 ---
 
@@ -168,6 +191,7 @@ docker compose logs -f ipa-site
 | `accounts.json` | 账号列表和当前使用的账号 |
 | `certs/<id>/` | 上传的签名证书、描述文件和证书密码（权限 600）。**不要外传** |
 | `signed/` | 证书签名后的 IPA（最多保留 20 个） |
+| `fairplay/<名称>.bin` | 解密用的 Apple ID 凭证（权限 600）。**不要外传** |
 | `.keychain-passphrase` | 解密上面登录状态的口令，首次启动自动生成。**删了就要重新登录 Apple ID，也不要外传** |
 | `.link-secret` | 安装链接的签名密钥，自动生成 |
 | `.version-cache.json` | 查过的历史版本号和发布日期（不会变，查一次就记住，删了只是要重新查） |
@@ -192,5 +216,6 @@ Windows / macOS / Linux 都可以：
 
 1. 从 [ipatool releases](https://github.com/majd/ipatool/releases) 下载对应系统的 ipatool，放到 `server.py` 同目录（Windows 为 `ipatool.exe`）
 2. `python server.py`（需要 Python 3.8+，无第三方依赖），打开 http://127.0.0.1:8686
+3. 要用解密功能时（需要 Python 3.10+）：把 fairplay-decrypt 的 `decrypt.py`、`core.py` 放到 `server.py` 同目录的 `fairplay/` 里，再 `pip install cryptography`
 
 默认只监听本机。上面的环境变量同样适用（例如 `IPA_HOST=0.0.0.0 IPA_PASSWORD=xxx python server.py`）。

@@ -52,6 +52,17 @@
   .tag { font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
   .tag.free { color: var(--ok); }
   .actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .row .actions { margin-top: 6px; }
+  .choice { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .choice label { position: relative; cursor: pointer; }
+  .choice input { position: absolute; opacity: 0; pointer-events: none; }
+  .choice span { display: inline-block; border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px; }
+  .choice input:checked + span { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .choice input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .fp-list { border: 1px solid var(--line); border-radius: 10px; }
+  .fp-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .fp-add input[type=text] { width: 110px; }
+  .fp-add input[type=file] { flex: 1 1 160px; min-width: 0; font-size: 12px; }
   aside { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 72px; }
   @media (max-width: 900px) { aside { position: static; } }
   .panel-h { display: flex; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); font-weight: 600; gap: 8px; }

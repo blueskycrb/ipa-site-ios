@@ -12,6 +12,7 @@
     <h1>IPA 下载站</h1>
     <span id="toolInfo" class="muted small"></span>
     <a class="btn sm" href="/sign">证书签名</a>
+    <button id="fpBtn" class="btn sm" title="管理解密用的 Apple ID 凭证">解密凭证</button>
     <span class="sp"></span>
     <span id="acct" class="muted small ellip"></span>
     <select id="acctSel" class="small" title="切换 Apple ID" hidden></select>
@@ -52,6 +53,10 @@
       <div class="panel-h">下载任务 <span class="sp"></span><button class="btn sm" id="clearJobs">清除已完成</button></div>
       <div class="list" id="jobs"><div class="empty">暂无任务</div></div>
     </div>
+    <div class="card" id="fpJobsCard" hidden>
+      <div class="panel-h">解密任务 <span class="sp"></span><button class="btn sm" id="clearFpJobs">清除已完成</button></div>
+      <div class="list" id="fpJobs"></div>
+    </div>
     <div class="card">
       <div class="panel-h">已下载文件 <span class="sp"></span><button class="btn sm" id="refreshFiles">刷新</button></div>
       <div class="list" id="files"><div class="empty">暂无文件</div></div>
@@ -86,6 +91,26 @@
     <div id="verList"></div>
   </div>
   <div class="foot"><button class="btn" id="verClose">关闭</button></div>
+</dialog>
+
+<dialog id="fpDlg">
+  <div class="body">
+    <h2>解密凭证</h2>
+    <div class="small muted">App Store 原版 IPA 是加密的（重签后会闪退），要用下载它的 Apple ID 的凭证解密：就是 fairplay-decrypt 从越狱设备导出的 16 字节 <code>credential.bin</code>。每个 Apple ID 一个，建议按地区命名，例如 US、CN。解密后的 IPA 可以证书签名或用 TrollStore 安装。</div>
+    <div id="fpReason" class="notice warn small" hidden></div>
+    <div id="fpList" class="fp-list"></div>
+    <div id="fpPick" hidden>
+      <div class="small muted">点「解密」时用哪个凭证</div>
+      <div id="fpChoice" class="choice"></div>
+    </div>
+    <form id="fpAdd" class="fp-add">
+      <input type="text" id="fpName" placeholder="名称，如 US" maxlength="32" required>
+      <input type="file" id="fpFile" accept=".bin" required>
+      <button class="btn primary" id="fpAddBtn">添加</button>
+    </form>
+    <div id="fpMsg" class="small"></div>
+  </div>
+  <div class="foot"><button class="btn" id="fpClose">关闭</button></div>
 </dialog>
 
 <div id="toast"></div>
@@ -291,24 +316,29 @@ async function loadFiles() {
   const r = await api("/api/files");
   if (!r.ok) return;
   const alistOn = status.alist && status.alist.enabled;
+  const decryptOn = status.decrypt && !status.decrypt.reason;
   $("#files").innerHTML = r.files.length ? r.files.map(f => {
     const busy = f.alist && (f.alist.status === "queued" || f.alist.status === "running");
     const app = f.app || {};
+    const decTag = app.decrypted ? ` <span class="tag">已解密${app.decryptedWith ? " · " + esc(app.decryptedWith) : ""}</span>` : "";
     return `
     <div class="row">
       ${app.icon ? `<img src="${esc(app.icon)}" alt="">` : ""}
       <div class="grow">
         ${app.name
-          ? `<div class="ellip" title="${esc(app.name)}">${esc(app.name)} <span class="muted small">v${esc(app.version)}</span></div>
+          ? `<div class="ellip" title="${esc(app.name)}">${esc(app.name)} <span class="muted small">v${esc(app.version)}</span>${decTag}</div>
              <div class="ellip small muted" title="${esc(f.name)}">${esc(f.name)}</div>`
           : `<div class="ellip small" title="${esc(f.name)}">${esc(f.name)}</div>`}
         <div class="small muted">${fmtSize(f.size)} · ${fmtTime(f.mtime)}</div>
         ${alistState(f.alist)}
+        <div class="actions">
+          <a class="btn sm" href="/files/${encodeURIComponent(f.name)}">保存</a>
+          ${status.install && status.install.enabled && app.bundleID ? `<button class="btn sm" data-install="${esc(f.name)}">安装</button>` : ""}
+          ${decryptOn && /\.ipa$/i.test(f.name) && !app.decrypted ? `<button class="btn sm" data-decrypt="${esc(f.name)}">解密</button>` : ""}
+          ${alistOn ? `<button class="btn sm" data-alist="${esc(f.name)}" ${busy ? "disabled" : ""}>${f.alist && f.alist.status === "done" ? "重传" : "传到 Alist"}</button>` : ""}
+          <button class="btn sm danger" data-del="${esc(f.name)}">删除</button>
+        </div>
       </div>
-      <a class="btn sm" href="/files/${encodeURIComponent(f.name)}">保存</a>
-      ${status.install && status.install.enabled && app.bundleID ? `<button class="btn sm" data-install="${esc(f.name)}">安装</button>` : ""}
-      ${alistOn ? `<button class="btn sm" data-alist="${esc(f.name)}" ${busy ? "disabled" : ""}>${f.alist && f.alist.status === "done" ? "重传" : "传到 Alist"}</button>` : ""}
-      <button class="btn sm danger" data-del="${esc(f.name)}">删除</button>
     </div>`;
   }).join("") : `<div class="empty">暂无文件</div>`;
   if (r.files.some(f => f.alist && (f.alist.status === "queued" || f.alist.status === "running")))
@@ -323,6 +353,18 @@ $("#files").onclick = async e => {
     location.href = r.url;   // itms-services:// 只有 iPhone / iPad 的 Safari 能打开
     return;
   }
+  const dec = e.target.closest("[data-decrypt]");
+  if (dec) {
+    const credential = fpChoice();
+    const r = await api("/api/decrypt", { body: { name: dec.dataset.decrypt, credential } });
+    if (!r.ok) {
+      toast(r.error);
+      if (!(status.decrypt.credentials || []).length) openFp();
+      return;
+    }
+    toast(`已加入解密队列（${credential === "auto" ? "自动识别凭证" : "用 " + credential + " 凭证"}）`);
+    return pollFpJobs();
+  }
   const up = e.target.closest("[data-alist]");
   if (up) {
     up.disabled = true;
@@ -336,6 +378,83 @@ $("#files").onclick = async e => {
   toast(r.ok ? "已删除" : r.error); loadFiles();
 };
 $("#refreshFiles").onclick = loadFiles;
+
+// ---------- 解密（fairplay-decrypt）
+// 凭证按 Apple ID 地区命名（US、CN…）；「自动识别」时服务器依次试每个凭证。
+function fpChoice() {
+  const saved = store("fpCred") || "auto", names = (status.decrypt && status.decrypt.credentials) || [];
+  return saved === "auto" || names.includes(saved) ? saved : "auto";
+}
+
+let fpTimer = null;
+async function pollFpJobs() {
+  clearTimeout(fpTimer);
+  const r = await api("/api/decrypt/jobs");
+  if (!r.ok) return;
+  $("#fpJobsCard").hidden = !r.jobs.length;
+  $("#fpJobs").innerHTML = r.jobs.map(j => {
+    const st = { queued: "排队中", running: "解密中", done: "完成", error: "失败" }[j.status];
+    const cred = j.used || (j.credential === "auto" ? "自动识别" : j.credential);
+    const detail = j.status === "running" ? j.log : j.status === "done" ? j.message : "";
+    return `<div class="row">
+      ${j.icon ? `<img src="${esc(j.icon)}" alt="">` : ""}
+      <div class="grow">
+        <div class="ellip" title="${esc(j.name)}">${esc(j.appName || j.name)}${j.version ? ` <span class="muted small">v${esc(j.version)}</span>` : ""}</div>
+        <div class="small st-${j.status}">${st} · ${esc(cred)}${detail ? " · " + esc(detail) : ""}${j.status === "done" && j.finishedAt ? ` · 用时 ${Math.round(j.finishedAt - j.startedAt)} 秒` : ""}</div>
+        ${j.status === "running" ? `<div class="prog indet"><div></div></div>` : ""}
+        ${j.error ? `<div class="small err">${esc(j.error)}</div>` : ""}
+      </div>
+      ${j.status === "done" && j.file ? `<a class="btn sm" href="/files/${encodeURIComponent(j.file)}">保存</a>` : ""}
+    </div>`;
+  }).join("");
+  const doneKey = r.jobs.filter(j => j.status === "done").map(j => j.id).join();
+  if (doneKey !== pollFpJobs.doneKey) { pollFpJobs.doneKey = doneKey; loadFiles(); }
+  if (r.jobs.some(j => j.status === "queued" || j.status === "running")) fpTimer = setTimeout(pollFpJobs, 1000);
+}
+$("#clearFpJobs").onclick = async () => { await api("/api/decrypt/clear", { body: {} }); pollFpJobs(); };
+
+async function loadFp() {
+  const r = await api("/api/decrypt/credentials");
+  if (!r.ok) return;
+  const names = r.credentials.map(c => c.name);
+  status.decrypt = { reason: r.reason, credentials: names };
+  $("#fpReason").hidden = !r.reason;
+  $("#fpReason").textContent = r.reason || "";
+  $("#fpList").innerHTML = names.length ? r.credentials.map(c => `
+    <div class="row"><div class="grow"><b>${esc(c.name)}</b> <span class="small muted">添加于 ${fmtTime(c.addedAt)}</span></div>
+      <button class="btn sm danger" data-fpdel="${esc(c.name)}">删除</button></div>`).join("")
+    : `<div class="empty small">还没有凭证，在下面添加</div>`;
+  const choices = ["auto", ...names], current = fpChoice();
+  $("#fpPick").hidden = names.length < 2;
+  $("#fpChoice").innerHTML = choices.map(n => `<label><input type="radio" name="fpCred" value="${esc(n)}" ${n === current ? "checked" : ""}><span>${n === "auto" ? "自动识别" : esc(n)}</span></label>`).join("");
+}
+function openFp() { $("#fpMsg").textContent = ""; $("#fpDlg").showModal(); loadFp(); }
+$("#fpBtn").onclick = openFp;
+$("#fpClose").onclick = () => $("#fpDlg").close();
+$("#fpChoice").onchange = e => store("fpCred", e.target.value);
+$("#fpFile").onchange = e => {   // 文件名是 US.bin 这样时直接当名称
+  const f = e.target.files[0], m = f && f.name.match(/^([A-Za-z0-9_-]{1,32})\.bin$/);
+  if (m && m[1].toLowerCase() !== "credential" && !$("#fpName").value.trim()) $("#fpName").value = m[1].toUpperCase();
+};
+$("#fpAdd").onsubmit = async e => {
+  e.preventDefault();
+  const f = $("#fpFile").files[0], msg = $("#fpMsg");
+  if (!f) return;
+  if (f.size !== 16) { msg.className = "small err"; msg.textContent = `凭证文件应该正好 16 字节，这个有 ${f.size} 字节，可能选错文件了`; return; }
+  const data = btoa(String.fromCharCode(...new Uint8Array(await f.arrayBuffer())));
+  $("#fpAddBtn").disabled = true;
+  const r = await api("/api/decrypt/credentials", { body: { name: $("#fpName").value, data } });
+  $("#fpAddBtn").disabled = false;
+  msg.className = r.ok ? "small st-done" : "small err";
+  msg.textContent = r.ok ? `已添加 ${r.name}` : r.error;
+  if (r.ok) { $("#fpAdd").reset(); loadFp(); }
+};
+$("#fpList").onclick = async e => {
+  const b = e.target.closest("[data-fpdel]"); if (!b) return;
+  if (!confirm(`删除凭证 ${b.dataset.fpdel}？`)) return;
+  const r = await api("/api/decrypt/credentials/" + encodeURIComponent(b.dataset.fpdel), { method: "DELETE" });
+  toast(r.ok ? "已删除" : r.error); loadFp();
+};
 
 // ---------- 历史版本
 // 最新 5 个版本自动查版本号，其余点「查看」；同时最多查 3 个，查过的服务器会记住。
@@ -496,7 +615,7 @@ $("#verList").onclick = async e => {
 };
 $("#verClose").onclick = () => { verFind = null; verApp = null; $("#verDlg").close(); };
 
-loadStatus().then(loadFiles); pollJobs();
+loadStatus().then(loadFiles); pollJobs(); pollFpJobs();
 </script>
 </body>
 </html>
