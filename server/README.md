@@ -154,10 +154,11 @@ docker compose logs -f ipa-site
 
 1. **准备凭证**：凭证是 fairplay-decrypt 从越狱设备导出的 16 字节 `credential.bin`，每个 Apple ID 一个（导出方法见 fairplay-decrypt 的 credential-retrieval）。
 2. **添加凭证**：网页右上角「解密凭证」，名称建议用 Apple ID 的地区（US、CN…），选 `credential.bin` 后点「添加」。文件名本身是 `US.bin` 这样时会自动填名称。
-3. **解密**：在「已下载文件」里点原版 IPA 的「解密」。有多个凭证时，可以在「解密凭证」里选默认用哪个：
-   - **自动识别**：依次试每个凭证，直到有一个能解开。凭证不对时很快就失败，所以基本不慢；
+3. **对应 Apple ID**：在凭证列表里给每个凭证选「对应 Apple ID」（网站里登录过的账号），例如 US 对应美区账号、CN 对应国区账号。一个 Apple ID 只对应一个凭证。
+4. **解密**：在「已下载文件」里点原版 IPA 的「解密」。有多个凭证时，可以在「解密凭证」里选默认用哪个：
+   - **自动识别**（默认）：网站会记下每个 IPA 是用哪个 Apple ID 下载的，解密时先用这个账号对应的凭证。更新前下载的、上传的文件没有账号记录，就依次试每个凭证。凭证不对时很快就失败，所以基本不慢；
    - 也可以固定用 US / CN。
-4. 解密完成后，同目录多出一个「应用名_版本_decrypted.ipa」，标着「已解密 · US」。
+5. 解密完成后，同目录多出一个「应用名_版本_decrypted.ipa」，标着「已解密 · US」。
 
 说明：
 
@@ -192,6 +193,7 @@ docker compose logs -f ipa-site
 | `certs/<id>/` | 上传的签名证书、描述文件和证书密码（权限 600）。**不要外传** |
 | `signed/` | 证书签名后的 IPA（最多保留 20 个） |
 | `fairplay/<名称>.bin` | 解密用的 Apple ID 凭证（权限 600）。**不要外传** |
+| `fairplay/links.json` | 凭证和 Apple ID 的对应关系 |
 | `.keychain-passphrase` | 解密上面登录状态的口令，首次启动自动生成。**删了就要重新登录 Apple ID，也不要外传** |
 | `.link-secret` | 安装链接的签名密钥，自动生成 |
 | `.version-cache.json` | 查过的历史版本号和发布日期（不会变，查一次就记住，删了只是要重新查） |

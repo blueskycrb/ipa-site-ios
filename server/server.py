@@ -569,6 +569,8 @@ def rename_readable(src, info):
         meta[target] = {"name": info.get("name") or base, "bundleID": bundle, "version": version,
                         "appID": info.get("appID") or (int(m.group("appid")) if m else None),
                         "icon": info.get("icon")}
+        if info.get("accountEmail"):   # 用哪个 Apple ID 下载的，解密时按它选凭证
+            meta[target]["accountEmail"] = info["accountEmail"]
         save_meta(meta)
     return target
 
@@ -677,7 +679,8 @@ def download_worker():
             name = None
             if src and src.is_file():
                 name = rename_readable(src, {"name": job.get("name"), "bundleID": job.get("bundleID"),
-                                             "appID": job.get("appID"), "icon": job.get("icon")})
+                                             "appID": job.get("appID"), "icon": job.get("icon"),
+                                             "accountEmail": job.get("accountEmail")})
             job["status"] = "done"
             job["file"] = name
             job["purchased"] = bool(res.get("purchased"))
@@ -1476,11 +1479,14 @@ def signed_links(key, host):
 # App Store 原版 IPA 的主程序是 FairPlay 加密的，重签后会闪退。用 fairplay-decrypt
 # （https://github.com/EthanArbuckle/fairplay-decrypt）加上从越狱设备导出的 16 字节账号凭证，
 # 可以在服务器上离线解密，解密后的 IPA 能证书签名或用 TrollStore 安装。每个 Apple ID 一个凭证，
-# 按地区命名（US.bin、CN.bin）；「自动识别」会依次试每个凭证，凭证不对时很快就失败。
-# 解密脚本依赖 cryptography，在子进程里运行，网站本身仍只用标准库。
+# 按地区命名（US.bin、CN.bin），并在网页上和网站里登录的 Apple ID 对应起来。「自动识别」先用
+# 下载这个 IPA 的 Apple ID 对应的凭证；没记录账号（以前下载的、上传的）或没对应时依次试每个凭证，
+# 凭证不对时很快就失败。解密脚本依赖 cryptography，在子进程里运行，网站本身仍只用标准库。
 
 FAIRPLAY_DIR = Path(os.environ.get("FAIRPLAY_DIR", BASE_DIR / "fairplay"))
 FAIRPLAY_CRED_DIR = DATA_DIR / "fairplay"
+FAIRPLAY_LINKS_FILE = FAIRPLAY_CRED_DIR / "links.json"   # 凭证名称 -> 对应的 Apple ID 邮箱
+_fairplay_lock = threading.Lock()
 DECRYPT_WORK_DIR = DOWNLOAD_DIR / ".decrypt"   # 和下载目录同一块盘，解密完直接改名移过去
 CRED_NAME = re.compile(r"[A-Za-z0-9_-]{1,32}")
 shutil.rmtree(DECRYPT_WORK_DIR, ignore_errors=True)
@@ -1510,14 +1516,44 @@ def decrypt_unavailable():
     return None
 
 
+def load_fairplay_links():
+    try:
+        return json.loads(FAIRPLAY_LINKS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_fairplay_links(links):
+    FAIRPLAY_CRED_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = FAIRPLAY_LINKS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(links, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, FAIRPLAY_LINKS_FILE)
+
+
 def fairplay_credentials():
     if not FAIRPLAY_CRED_DIR.is_dir():
         return []
-    return [{"name": p.stem, "addedAt": p.stat().st_mtime}
+    links = load_fairplay_links()
+    return [{"name": p.stem, "addedAt": p.stat().st_mtime, "email": links.get(p.stem)}
             for p in sorted(FAIRPLAY_CRED_DIR.glob("*.bin")) if CRED_NAME.fullmatch(p.stem)]
 
 
-def add_fairplay_credential(name, data):
+def link_fairplay_credential(name, email):
+    """把凭证和 Apple ID 对应起来（email 为空时取消）。一个 Apple ID 只有一个凭证，原来对应它的凭证会取消对应。"""
+    email = (email or "").strip()
+    if name not in {c["name"] for c in fairplay_credentials()}:
+        raise IpatoolError(f"没有 {name} 这个凭证")
+    if email and ("@" not in email or len(email) > 254):
+        raise IpatoolError("Apple ID 邮箱无效")
+    with _fairplay_lock:
+        links = {k: v for k, v in load_fairplay_links().items()
+                 if k != name and not (email and (v or "").lower() == email.lower())}
+        if email:
+            links[name] = email
+        save_fairplay_links(links)
+
+
+def add_fairplay_credential(name, data, email=None):
     name = (name or "").strip().upper()
     if not CRED_NAME.fullmatch(name):
         raise IpatoolError("名称只能用字母、数字、- 和 _，建议用地区，例如 US、CN")
@@ -1532,6 +1568,8 @@ def add_fairplay_credential(name, data):
     tmp.write_bytes(data)
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    if email:
+        link_fairplay_credential(name, email)
     return name
 
 
@@ -1539,6 +1577,10 @@ def delete_fairplay_credential(name):
     if not CRED_NAME.fullmatch(name or ""):
         raise IpatoolError("凭证名称无效")
     (FAIRPLAY_CRED_DIR / f"{name}.bin").unlink(missing_ok=True)
+    with _fairplay_lock:
+        links = load_fairplay_links()
+        if links.pop(name, None) is not None:
+            save_fairplay_links(links)
 
 
 def macho_cryptid(data):
@@ -1618,10 +1660,18 @@ def run_decrypt(job):
     src = DOWNLOAD_DIR / job["name"]
     if not src.is_file():
         raise IpatoolError("服务器上已经没有这个文件了")
-    creds = [c["name"] for c in fairplay_credentials()]
-    candidates = creds if job["credential"] == "auto" else [c for c in creds if c == job["credential"]]
+    creds = fairplay_credentials()
+    names = [c["name"] for c in creds]
+    linked = []
+    if job["credential"] == "auto":
+        # 先用下载这个 IPA 的 Apple ID 对应的凭证，再依次试其他的
+        email = (job.get("accountEmail") or "").lower()
+        linked = [c["name"] for c in creds if email and (c.get("email") or "").lower() == email]
+        candidates = linked + [n for n in names if n not in linked]
+    else:
+        candidates = [n for n in names if n == job["credential"]]
     if not candidates:
-        raise IpatoolError(f"没有 {job['credential']} 这个凭证" if creds else "还没有添加解密凭证")
+        raise IpatoolError(f"没有 {job['credential']} 这个凭证" if names else "还没有添加解密凭证")
     try:
         fairplay_precheck(src)
     except zipfile.BadZipFile:
@@ -1656,7 +1706,10 @@ def run_decrypt(job):
                             "decrypted": True, "decryptedWith": cred, "decryptedFrom": job["name"]}
             save_meta(meta)
         count = re.search(r"decrypted-binaries=(\d+)", lines[-1]) if lines else None
-        job.update(used=cred, file=target, message=f"已解密 {count.group(1)} 个程序" if count else "完成")
+        message = f"已解密 {count.group(1)} 个程序" if count else "完成"
+        if linked and cred != linked[0]:
+            message += f"（对应这个 Apple ID 的 {linked[0]} 解不开，是 {cred} 解开的，请检查凭证和 Apple ID 的对应关系）"
+        job.update(used=cred, file=target, message=message)
         if ALIST_AUTO_UPLOAD and alist_enabled():
             enqueue_alist(target)
     finally:
@@ -1687,7 +1740,8 @@ def enqueue_decrypt(name, credential):
                 return j
         job = {"id": uuid.uuid4().hex[:10], "status": "queued", "name": name, "credential": credential,
                "used": None, "createdAt": time.time(), "log": "", "file": None, "message": None, "error": None,
-               "appName": app.get("name"), "version": app.get("version"), "icon": app.get("icon")}
+               "appName": app.get("name"), "version": app.get("version"), "icon": app.get("icon"),
+               "accountEmail": app.get("accountEmail")}
         decrypt_jobs[job["id"]] = job
     decrypt_queue.put(job["id"])
     return job
@@ -1866,8 +1920,11 @@ class Handler(BaseHTTPRequestHandler):
                     blob = base64.b64decode(data.get("data") or "", validate=True)
                 except ValueError:
                     return self.send_error_json("文件内容无效")
-                name = add_fairplay_credential(data.get("name"), blob)
+                name = add_fairplay_credential(data.get("name"), blob, data.get("email"))
                 return self.send_json({"ok": True, "name": name, "credentials": fairplay_credentials()})
+            if url.path == "/api/decrypt/credentials/link":
+                link_fairplay_credential(data.get("name") or "", data.get("email"))
+                return self.send_json({"ok": True, "credentials": fairplay_credentials()})
             if url.path == "/api/decrypt/clear":
                 with decrypt_jobs_lock:
                     for k in [k for k, j in decrypt_jobs.items() if j["status"] in ("done", "error")]:
