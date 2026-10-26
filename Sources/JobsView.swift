@@ -151,10 +151,11 @@ struct JobRow: View {
     }
 }
 
-/// 一个解密任务；完成后可以直接证书签名，或用 TrollStore 安装解密后的文件
+/// 一个解密任务；完成后可以把解密后的文件存到手机 / 导出，证书签名，或用 TrollStore 安装
 struct DecryptJobRow: View {
     let job: DecryptJob
     @Binding var toast: String?
+    @ObservedObject private var phone = PhoneDownloads.shared
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -176,10 +177,25 @@ struct DecryptJobRow: View {
                     Text(err).font(.caption2).foregroundColor(.red)
                 }
                 if job.status == "done", let file = job.file {
-                    HStack {
-                        // 解密后没有 Apple 的签名，不能系统安装：TrollStore 模式下会显示「TrollStore 安装」
-                        InstallButton(name: file, systemAvailable: false, toast: $toast)
-                        SignButton(name: file, source: "server", toast: $toast)
+                    if let item = phone.active[file] {
+                        PhoneProgressLine(item: item)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            SaveToPhoneButton(name: file, alistAvailable: false, phone: phone, toast: $toast)
+                            // 存到手机以后可以导出：交给 TrollStore、存到「文件」、AirDrop 等
+                            if let local = phone.localFiles.first(where: { $0.lastPathComponent == file }) {
+                                ShareLink(item: local) {
+                                    Label("导出", systemImage: "square.and.arrow.up")
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                        HStack {
+                            // 解密后没有 Apple 的签名，不能系统安装：TrollStore 模式下会显示「TrollStore 安装」
+                            InstallButton(name: file, systemAvailable: false, toast: $toast)
+                            SignButton(name: file, source: "server", toast: $toast)
+                        }
                     }
                     .controlSize(.small)
                     .padding(.top, 2)
