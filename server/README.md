@@ -6,7 +6,7 @@
 
 - 网页登录 Apple ID（支持双重认证、多个账号随时切换），搜索 App，下载最新版或任意历史版本
 - 历史版本按版本号或日期查找（如 14.8.40、2026-09）
-- 文件以「应用名_版本.ipa」命名，列表显示图标和版本
+- 文件以「应用名_版本.ipa」命名，列表显示图标和版本；上传的、改版的、证书签名的 IPA 也会从 IPA 里取出图标显示
 - 下载完自动上传到 Alist（可选），可浏览 Alist 目录、用网盘直链下载
 - iPhone 一键安装：系统安装（itms-services，需要 HTTPS）或交给 TrollStore 安装
 - 证书签名：上传自己的 p12 证书 + 描述文件，用 zsign 重签后安装（网页 `/sign`）
@@ -72,6 +72,7 @@
 ├── signed/<证书id>/*.ipa         证书签名后的 IPA（最多保留 20 个），signed/meta.json 是它们的信息
 ├── fairplay/<名称>.bin           解密用的 Apple ID 凭证，例如 US.bin、CN.bin
 ├── fairplay/links.json           凭证和 Apple ID 的对应关系
+├── icons/<哈希>.png               从 IPA 里取出的 App 图标（上传的、改版的、证书签名的 App 用），自动生成
 └── downloads/
     ├── *.ipa                     下载的、上传的、解密出来的 IPA
     ├── .meta.json                每个文件的应用名、版本、图标、下载用的 Apple ID、是否解密
@@ -86,6 +87,7 @@
 | `fairplay/*.bin` | 删了要重新添加凭证 | **高**：能解密这个 Apple ID 下载的所有 App |
 | `downloads/`、`signed/` | 可以，只是文件没了 | 低 |
 | `.link-secret` | 可以，之前生成的安装链接会失效 | 中 |
+| `icons/` | 可以，下次启动会重新生成 | 无 |
 | `.version-cache.json`、`.partial/`、`.decrypt/` | 可以 | 无 |
 
 ---

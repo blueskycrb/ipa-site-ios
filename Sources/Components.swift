@@ -6,8 +6,14 @@ struct AppIconView: View {
     let url: String?
     var size: CGFloat = 48
 
+    /// App Store 的图标是完整地址；服务器从 IPA 里取出的图标是 /icon/… 这样的路径，补上服务器地址
+    private var resolved: URL? {
+        guard let url else { return nil }
+        return url.hasPrefix("/") ? URL(string: API.base + url) : URL(string: url)
+    }
+
     var body: some View {
-        AsyncImage(url: url.flatMap { URL(string: $0) }) { image in
+        AsyncImage(url: resolved) { image in
             image.resizable()
         } placeholder: {
             Color.secondary.opacity(0.15)

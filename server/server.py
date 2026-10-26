@@ -37,6 +37,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1142,9 +1143,10 @@ def build_manifest(name, ipa_url):
     info = load_meta().get(name) or {}
     ipa_url = urllib.parse.quote(ipa_url, safe=URL_SAFE)
     assets = [{"kind": "software-package", "url": ipa_url}]
-    if info.get("icon"):
-        assets += [{"kind": "display-image", "needs-shine": False, "url": info["icon"]},
-                   {"kind": "full-size-image", "needs-shine": False, "url": info["icon"]}]
+    icon = absolute_icon(info.get("icon"))
+    if icon:
+        assets += [{"kind": "display-image", "needs-shine": False, "url": icon},
+                   {"kind": "full-size-image", "needs-shine": False, "url": icon}]
     return plistlib.dumps({"items": [{"assets": assets, "metadata": {
         "bundle-identifier": info.get("bundleID") or "",
         "bundle-version": info.get("version") or "1.0",
@@ -1564,6 +1566,8 @@ def run_sign(job):
             detail = (p.stderr or p.stdout).strip().splitlines()
             raise IpatoolError("签名失败：" + (" ".join(detail[-3:]) if detail else f"zsign 退出码 {p.returncode}"))
         info = ipa_info(tmp_out)
+        icon = ((load_meta().get(job["name"]) or {}).get("icon") or job.get("icon")
+                or find_icon(tmp_out, info.get("bundleID")))
         os.replace(tmp_out, out)
         key = f"{job['cert']}/{out_name}"
         old = job.get("replaces")
@@ -1571,7 +1575,7 @@ def run_sign(job):
             meta = load_signed_meta()
             meta[key] = {**info, "source": job["source"], "sourceName": job["name"], "signedAt": time.time(),
                          "cert": job["cert"], "teamID": cert.get("teamID"), "size": out.stat().st_size,
-                         "icon": (load_meta().get(job["name"]) or {}).get("icon") or job.get("icon")}
+                         "icon": icon}
             # 换证书重签后，旧证书已经过期 / 删除的那份没用了，顺手删掉
             if old and old != key and old in meta and cert_expired(old.partition("/")[0]):
                 signed_path_of(old).unlink(missing_ok=True)
@@ -1610,6 +1614,195 @@ def signed_links(key, host):
         "trollstoreURL": "apple-magnifier://install?url=" + urllib.parse.quote(dl, safe=""),
         "downloadURL": dl,
     }
+
+
+# ---------------------------------------------------------------- App 图标
+#
+# 从 App Store 下载的文件有商店的图标地址；上传的、改版的、证书签名的 IPA 没有，就从 IPA 里取出主程序
+# 的图标，存到数据目录的 icons/ 里（文件名是内容的哈希，同一个图标只存一份）。IPA 里的 PNG 是苹果私有的
+# CgBI 格式，浏览器打不开，这里转回普通 PNG。取不到时再按 Bundle ID 查 App Store。图标链接带签名，
+# 手机 App 和网页不用网站密码也能直接加载。
+
+ICONS_DIR = DATA_DIR / "icons"
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_chunks(data):
+    pos = 8
+    while pos + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        yield kind, data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if kind == b"IEND":
+            return
+
+
+def _png_chunk(kind, body):
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+
+
+def _png_width(png):
+    for kind, body in _png_chunks(png):
+        if kind == b"IHDR":
+            return struct.unpack(">I", body[:4])[0]
+    return 0
+
+
+def normal_png(data):
+    """CgBI 格式的 PNG 转回普通 PNG（本来就是普通 PNG 时原样返回）；不认识的格式返回 None。
+    CgBI 比普通 PNG 多一个 CgBI 块，像素数据是不带 zlib 头的 deflate，颜色顺序是 BGRA。
+    PNG 的行过滤都是按同一颜色通道计算的，所以不用还原过滤，直接交换每个像素的 B 和 R 字节就行。"""
+    if data[:8] != PNG_SIGNATURE:
+        return None
+    chunks = list(_png_chunks(data))
+    if not chunks or chunks[0][0] != b"CgBI":
+        return data
+    chunks = chunks[1:]
+    ihdr = next((body for kind, body in chunks if kind == b"IHDR"), b"")
+    if len(ihdr) != 13:
+        return None
+    width, height, depth, color, _, _, interlace = struct.unpack(">IIBBBBB", ihdr)
+    if depth != 8 or color not in (2, 6) or interlace:
+        return None
+    bpp = 4 if color == 6 else 3
+    try:
+        raw = bytearray(zlib.decompress(b"".join(body for kind, body in chunks if kind == b"IDAT"), -15))
+    except zlib.error:
+        return None
+    stride = width * bpp + 1   # 每行开头一个字节是过滤方式
+    if len(raw) < stride * height:
+        return None
+    for y in range(height):
+        start = y * stride + 1
+        row = raw[start:start + width * bpp]
+        row[0::bpp], row[2::bpp] = row[2::bpp], row[0::bpp]
+        raw[start:start + width * bpp] = row
+    # iDOT 记的是原来各段像素数据的位置（苹果用来并行解码），重新压缩后就不对了，iOS 会照着它解出花屏，要去掉
+    head = b"".join(_png_chunk(kind, body) for kind, body in chunks if kind not in (b"IDAT", b"IEND", b"iDOT"))
+    return PNG_SIGNATURE + head + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + _png_chunk(b"IEND", b"")
+
+
+def ipa_icon(path):
+    """取 IPA 主程序里最大的那张图标（普通 PNG）；取不到时返回 None。"""
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            plist_name = next((n for n in names if len(n.split("/")) == 3 and n.startswith("Payload/")
+                               and n.split("/")[1].endswith(".app") and n.endswith("/Info.plist")), None)
+            if not plist_name:
+                return None
+            app_dir = plist_name[:-len("Info.plist")]
+            info = plistlib.loads(z.read(plist_name))
+            bases = set(info.get("CFBundleIconFiles") or [])
+            for key in ("CFBundleIcons", "CFBundleIcons~ipad"):
+                primary = (info.get(key) or {}).get("CFBundlePrimaryIcon") or {}
+                bases.update(primary.get("CFBundleIconFiles") or [])
+                bases.add(primary.get("CFBundleIconName") or "")
+            bases.add(info.get("CFBundleIconFile") or "")
+            bases.discard("")
+            pngs = [n for n in names if n.startswith(app_dir) and "/" not in n[len(app_dir):] and n.lower().endswith(".png")]
+            picks = ([n for n in pngs if any(n[len(app_dir):].startswith(b) for b in bases)]
+                     or [n for n in pngs if "icon" in n[len(app_dir):].lower()])
+            best = None
+            for n in picks[:20]:
+                png = normal_png(z.read(n))
+                if png and (best is None or _png_width(png) > _png_width(best)):
+                    best = png
+            return best
+    except (OSError, zipfile.BadZipFile, KeyError, ValueError, struct.error, plistlib.InvalidFileException):
+        return None
+
+
+def icon_url(key):
+    sig = hmac.new(LINK_SECRET.encode(), ("icon\n" + key).encode(), "sha256").hexdigest()[:32]
+    return f"/icon/{sig}/{key}.png"
+
+
+def icon_file(rest):
+    """/icon/ 后面的部分（{签名}/{key}.png）验证通过时返回图标文件路径，否则 None。"""
+    sig, _, name = rest.partition("/")
+    key = name[:-4] if name.endswith(".png") else ""
+    if not re.fullmatch(r"[0-9a-f]{16}", key) or not hmac.compare_digest(icon_url(key), f"/icon/{sig}/{name}"):
+        return None
+    return ICONS_DIR / name
+
+
+def absolute_icon(icon):
+    """安装清单里的图标要完整的 https 地址；本站存的图标是相对路径，补上 IPA_PUBLIC_URL。"""
+    if icon and icon.startswith("/"):
+        return PUBLIC_URL + icon if PUBLIC_URL else None
+    return icon
+
+
+def app_store_icon(bundle):
+    for country in dict.fromkeys((COUNTRY, "us")):
+        url = "https://itunes.apple.com/lookup?" + urllib.parse.urlencode(
+            {"bundleId": bundle, "country": country, "entity": "software"})
+        try:
+            with apple_opener.open(url, timeout=10) as r:
+                results = json.load(r).get("results") or []
+        except Exception:
+            continue
+        if results and (results[0].get("artworkUrl100") or results[0].get("artworkUrl60")):
+            return results[0].get("artworkUrl100") or results[0].get("artworkUrl60")
+    return None
+
+
+def find_icon(path, bundle=None):
+    """IPA 的图标地址：先从 IPA 里取（存到 icons/），取不到再按 Bundle ID 查 App Store；都没有时返回 None。"""
+    png = ipa_icon(path)
+    if png:
+        key = hashlib.sha1(png).hexdigest()[:16]
+        target = ICONS_DIR / f"{key}.png"
+        if not target.exists():
+            ICONS_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = ICONS_DIR / f"{key}.tmp"
+            tmp.write_bytes(png)
+            os.replace(tmp, target)
+        return icon_url(key)
+    return app_store_icon(bundle) if bundle else None
+
+
+def backfill_icons():
+    """给没有图标的文件和签好的 App 补上图标（启动时在后台跑一遍）。"""
+    for p in sorted(DOWNLOAD_DIR.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in (".ipa", ".tipa"):
+            continue
+        app = load_meta().get(p.name)
+        if app and app.get("icon"):
+            continue
+        info = None
+        if app is None:   # 直接拷进来的文件：记下名称和版本，当作上传的（不能系统安装）
+            try:
+                info = ipa_info(p)
+            except (IpatoolError, OSError, zipfile.BadZipFile):
+                continue
+        icon = find_icon(p, (app or info or {}).get("bundleID"))
+        with meta_lock:
+            meta = load_meta()
+            entry = meta.get(p.name)
+            if entry is None and info:
+                entry = meta[p.name] = {"name": info["appName"], "version": info["version"], "uploaded": True}
+            if entry is not None and icon and not entry.get("icon"):
+                entry["icon"] = icon
+            save_meta(meta)
+    for key, item in load_signed_meta().items():
+        if item.get("icon"):
+            continue
+        try:
+            path = signed_path_of(key)
+        except IpatoolError:
+            continue
+        icon = find_icon(path, item.get("bundleID")) if path.is_file() else None
+        if icon:
+            with _signed_meta_lock:
+                meta = load_signed_meta()
+                if key in meta:
+                    meta[key]["icon"] = icon
+                    save_signed_meta(meta)
+
+
+threading.Thread(target=backfill_icons, daemon=True).start()
 
 
 # ---------------------------------------------------------------- FairPlay 解密
@@ -1832,6 +2025,8 @@ def run_decrypt(job):
             raise IpatoolError(explain_decrypt_error(lines))
         cred = tried[-1]
         target = f"{src.stem}_decrypted.ipa"
+        original = load_meta().get(job["name"]) or {}
+        icon = original.get("icon") or find_icon(work / f"{cred}.ipa", original.get("bundleID"))
         with meta_lock:
             os.replace(work / f"{cred}.ipa", DOWNLOAD_DIR / target)
             meta = load_meta()
@@ -1840,7 +2035,8 @@ def run_decrypt(job):
                 info = ipa_info(DOWNLOAD_DIR / target)
                 app = {"name": info["appName"], "version": info["version"]}
             # 不记 bundleID：解密后 Apple 的签名就失效了，不能「系统安装」，要签名或 TrollStore 安装
-            meta[target] = {"name": app.get("name"), "version": app.get("version"), "icon": app.get("icon"),
+            meta[target] = {"name": app.get("name"), "version": app.get("version"),
+                            "icon": icon,
                             "decrypted": True, "decryptedWith": cred, "decryptedFrom": job["name"]}
             save_meta(meta)
         count = re.search(r"decrypted-binaries=(\d+)", lines[-1]) if lines else None
@@ -1963,6 +2159,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         # iOS 安装器取清单和 IPA 时不带网站密码，靠链接里的签名放行
+        if url.path.startswith("/icon/"):
+            return self.serve_icon(url.path[len("/icon/"):])
         if url.path.startswith(("/install/", "/dl/", "/sdl/")):
             try:
                 return self.serve_signed(url.path)
@@ -2119,6 +2317,7 @@ class Handler(BaseHTTPRequestHandler):
                 info = ipa_info(tmp)
             except zipfile.BadZipFile:
                 raise IpatoolError("不是有效的 IPA 文件")
+            icon = find_icon(tmp, info["bundleID"])
             with meta_lock:
                 # 同名文件内容一样就直接用它，不一样就加序号
                 target, n = f"{base}.ipa", 1
@@ -2134,6 +2333,8 @@ class Handler(BaseHTTPRequestHandler):
                     meta = load_meta()
                     # 不记 bundleID：传上来的不是本站从 App Store 下载的，不能「系统安装」，要签名或 TrollStore 安装
                     meta[target] = {"name": info["appName"], "version": info["version"], "uploaded": True}
+                    if icon:
+                        meta[target]["icon"] = icon
                     save_meta(meta)
         finally:
             tmp.unlink(missing_ok=True)
@@ -2193,6 +2394,18 @@ class Handler(BaseHTTPRequestHandler):
         with p.open("rb") as f:
             shutil.copyfileobj(f, self.wfile, 1024 * 1024)
 
+    def serve_icon(self, rest):
+        p = icon_file(rest)
+        if not p or not p.is_file():
+            return self.send_error_json("Not found", 404)
+        body = p.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")   # 文件名就是内容哈希
+        self.end_headers()
+        self.wfile.write(body)
+
     def serve_signed(self, path):
         if path.startswith("/dl/"):
             name = verify_signed("dl", path[len("/dl/"):])
@@ -2215,7 +2428,8 @@ class Handler(BaseHTTPRequestHandler):
             info = load_signed_meta().get(name) or {}
             body = plistlib.dumps({"items": [{"assets": [
                 {"kind": "software-package", "url": PUBLIC_URL + signed_path("sdl", name, "/sdl")}] + (
-                [{"kind": "display-image", "needs-shine": False, "url": info["icon"]}] if info.get("icon") else []),
+                [{"kind": "display-image", "needs-shine": False, "url": absolute_icon(info["icon"])}]
+                if absolute_icon(info.get("icon")) else []),
                 "metadata": {"bundle-identifier": info.get("bundleID") or "", "bundle-version": info.get("version") or "1.0",
                              "kind": "software", "title": info.get("appName") or name.partition("/")[2]}}]})
         else:
