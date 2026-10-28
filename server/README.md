@@ -25,6 +25,7 @@
 | 文件 | 作用 | 部署时要不要改 |
 |---|---|---|
 | `server.py` | 网站程序：网页接口、下载队列、Alist 上传、安装链接、证书签名、解密、连 Apple 用的中转 | 不改 |
+| `fairplay_fast.py` | 解密的入口：用多个 CPU 核运行 fairplay-decrypt 的 `decrypt.py`，结果和原来逐字节相同 | 不改 |
 | `static/index.html` | 首页：搜索、下载任务、已下载文件、解密凭证 | 不改 |
 | `static/sign.html` | 证书签名页（`/sign`） | 不改 |
 | `static/app.css` | 网页样式 | 不改 |
@@ -52,7 +53,7 @@
 
 | 路径 | 内容 |
 |---|---|
-| `/app/server.py`、`/app/static/` | 网站程序和网页 |
+| `/app/server.py`、`/app/fairplay_fast.py`、`/app/static/` | 网站程序、解密入口和网页 |
 | `/app/fairplay/decrypt.py`、`core.py` | fairplay-decrypt 的解密脚本（构建时从 GitHub 按固定提交下载） |
 | `/usr/local/bin/ipatool` | Linux 版 ipatool（构建时从 GitHub releases 下载并校验 SHA-256） |
 | `/usr/local/bin/zsign` | 证书签名工具（构建时编译） |
@@ -217,7 +218,7 @@ docker compose up -d --build
 cd /opt/ipa-site                                   # 你的部署目录
 mkdir -p ../ipa-site-backup && cp -a server.py Dockerfile static ../ipa-site-backup/   # 先备份
 rm -rf /tmp/ipa-site-ios && git clone --depth 1 https://github.com/blueskycrb/ipa-site-ios.git /tmp/ipa-site-ios
-cd /tmp/ipa-site-ios/server && cp server.py Dockerfile README.md .dockerignore .env.example /opt/ipa-site/ && cd /opt/ipa-site
+cd /tmp/ipa-site-ios/server && cp server.py fairplay_fast.py Dockerfile README.md .dockerignore .env.example /opt/ipa-site/ && cd /opt/ipa-site
 cp -r /tmp/ipa-site-ios/server/static/. static/
 diff /tmp/ipa-site-ios/server/docker-compose.yml docker-compose.yml   # 没输出就是一样的
 docker compose up -d --build
@@ -314,7 +315,9 @@ docker compose start
 | 外网 IPv6 | 防火墙放行 8686，用 DDNS 域名访问；务必设置 `IPA_PASSWORD` |
 | 外网 + HTTPS | Lucky / Nginx / Caddy 反向代理到 `http://127.0.0.1:8686` 并配证书；或用自带 Caddy：`.env` 填 `DOMAIN`、`IPA_BIND=127.0.0.1`、`IPA_BIND6=[::1]`，然后 `docker compose --profile https up -d --build` |
 
-用 http 暴露到公网时，访问密码是明文传输的，长期在外网用建议加 HTTPS。
+用 http 暴露到公网时，访问密码是明文传输的，长期在外网用建议加 HTTPS，并且只开放 HTTPS 的端口、不要把 8686 直接开放到公网。
+
+**防猜密码**：输错密码的请求会排队一个一个处理，而且越错越慢（10 分钟内错 10 次以内每次等 1 秒，50 次以内 3 秒，再多 10 秒），不管同时发多少请求，每秒最多只能猜一次；密码正确的请求不受影响。日志里的「访问密码错误：IP（10 分钟内第 N 次）」可以看到有没有人在猜。没有按 IP 封禁，因为经反向代理或 IPv6 进来的请求，看到的来源地址可能都一样，按 IP 封会把自己也封掉。
 
 ---
 
@@ -378,7 +381,8 @@ docker compose start
 - 只能解密本站（或其他 ipatool 类工具）从 App Store 下载的原版 IPA：里面要有 `SC_Info` 授权文件。第三方网站下载的砸壳包已经是解密过的，网站会直接提示不用再解密。
 - IPA 必须是凭证对应的 Apple ID 下载的。国区 App 用国区账号下载，就要用国区账号的凭证解。
 - 解密后的 IPA 没有 Apple 的签名，不能「系统安装」，要证书签名或用 TrollStore 安装。
-- 一次只解一个（解密时要把主程序读进内存），其余排队。
+- 一次只解一个（解密时要把主程序读进内存），其余排队。每个 IPA 内部的逐页解密会分给服务器的多个 CPU 核同时做（`fairplay_fast.py`，结果和单核逐字节相同），并以较低优先级运行，不拖慢服务器上的其他服务。
+- 凭证是按 Apple ID 区分的：从越狱设备导出时，`retrieve.py` 默认用设备上第一个有许可的 App 对应的账号。要导出另一个账号的凭证，加 `--ipa 这个账号下载的.ipa`，否则两次导出的会是同一个凭证（网页添加时会提示「这个凭证已经添加过了」）。
 - 解密脚本在构建镜像时从 GitHub 下载（固定版本），要用新版本：`docker compose build --build-arg FAIRPLAY_COMMIT=提交号`。
 - 数据目录要放在支持硬链接的磁盘上（ext4、btrfs、xfs、NTFS 都行，exFAT / FAT32 不行），用默认的 Docker 卷不用管。
 

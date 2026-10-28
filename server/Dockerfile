@@ -60,7 +60,7 @@ COPY --from=zsign-build /fairplay /app/fairplay
 RUN useradd --create-home --home-dir /data --uid 1000 app
 
 WORKDIR /app
-COPY server.py ./
+COPY server.py fairplay_fast.py ./
 COPY static ./static
 
 ENV HOME=/data \

@@ -1970,13 +1970,15 @@ def explain_decrypt_error(lines):
 
 
 def run_decrypt_script(job, cred, src, out):
-    """用一个凭证跑一次 decrypt.py，返回 (成功与否, 输出行)。"""
+    """用一个凭证跑一次 decrypt.py（经 fairplay_fast.py 用多个核跑），返回 (成功与否, 输出行)。"""
     lines = []
+    fast = BASE_DIR / "fairplay_fast.py"
+    script = fast if fast.is_file() else FAIRPLAY_DIR / "decrypt.py"
     proc = subprocess.Popen(
-        [sys.executable, "-u", str(FAIRPLAY_DIR / "decrypt.py"), str(src), str(out),
+        [sys.executable, "-u", str(script), str(src), str(out),
          "--credential", str(FAIRPLAY_CRED_DIR / f"{cred}.bin")],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-        creationflags=NO_WINDOW)
+        creationflags=NO_WINDOW, env=dict(os.environ, FAIRPLAY_DIR=str(FAIRPLAY_DIR)))
     for line in proc.stdout:
         if line := line.strip():
             lines.append(line)
@@ -2100,6 +2102,26 @@ threading.Thread(target=decrypt_worker, daemon=True).start()
 
 
 # ---------------------------------------------------------------- HTTP
+#
+# 防猜密码：输错密码的请求排队一个一个处理，而且越错越慢（10 分钟内错 10 次以内每次 1 秒，50 次以内 3 秒，
+# 再多 10 秒），所以不管同时发多少请求，每秒最多猜一次。密码正确的请求不排队、不受影响。
+# 不按 IP 封：经反向代理或 IPv6（docker-proxy 转发）进来的请求，看到的来源地址可能都一样，按 IP 封会把自己也封掉。
+
+FAILED_LOGIN_WINDOW = 600
+_failed_logins = []                      # 最近输错的时间
+_failed_logins_lock = threading.Lock()
+_failed_login_queue = threading.Lock()   # 输错的请求在这里排队
+
+
+def note_failed_login():
+    """记一次输错，返回 (10 分钟内输错的次数, 这次要等的秒数)。"""
+    now = time.time()
+    with _failed_logins_lock:
+        _failed_logins[:] = [t for t in _failed_logins if now - t < FAILED_LOGIN_WINDOW]
+        _failed_logins.append(now)
+        count = len(_failed_logins)
+    return count, 1 if count <= 10 else 3 if count <= 50 else 10
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "IPASite/1.0"
@@ -2119,8 +2141,11 @@ class Handler(BaseHTTPRequestHandler):
                 password = ""
             if hmac.compare_digest(password.encode(), ACCESS_PASSWORD.encode()):
                 return True
-            print(f"访问密码错误：{self.client_address[0]}", flush=True)
-            time.sleep(1)  # 拖慢暴力猜测
+            count, delay = note_failed_login()
+            if count <= 10 or count % 10 == 0:
+                print(f"访问密码错误：{self.client_address[0]}（10 分钟内第 {count} 次，每次要等 {delay} 秒）", flush=True)
+            with _failed_login_queue:   # 输错的请求一个一个处理，同时发很多请求也快不了
+                time.sleep(delay)
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="IPA", charset="UTF-8"')
         self.send_header("Content-Length", "0")
