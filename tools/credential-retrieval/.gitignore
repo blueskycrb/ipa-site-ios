@@ -1,0 +1,8 @@
+/bundle/
+/data/
+*.bin
+*.ios
+*.tar.gz
+*.zip
+__pycache__/
+*.pyc

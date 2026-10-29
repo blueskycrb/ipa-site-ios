@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!retrieve.py
+!native_ssh.py
+!docker-entrypoint.sh

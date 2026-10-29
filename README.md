@@ -1,5 +1,7 @@
 # IPA 下载
 
+获取解密凭据：新增 [Windows + Docker + 越狱 iPad 获取 credential.bin 教程](tools/credential-retrieval/README.md)，包含无需本地 Mac 的工具编译、SSH 配置、按 Bundle ID 提取和 US/CN 多账号管理。
+
 自己搭的 App Store IPA 下载服务，分两部分：
 
 | 部分 | 目录 | 说明 |
