@@ -64,44 +64,24 @@ tools/credential-retrieval/
 
 ## 4. 配置并验证 SSH 密钥登录
 
-下例 `192.168.1.50` 只是示例地址，换成自己的 iPad IP。`set` 变量只对当前 CMD 窗口生效，新开窗口要重新设置。
+首次配置请打开 **[越狱 iPad SSH 详细教程（Dopamine）](SSH.md)**，按顺序完成：
+
+1. 在 iPad 上确认越狱生效、安装 OpenSSH 服务端、查看 Wi-Fi IP。
+2. 在 Windows CMD 生成专用密钥并复制 `.pub` 公钥。
+3. 用 mobile 的终端密码登录 iPad，执行 `sudo -i` 获取 root 权限。
+4. 将公钥追加到 root 的 `authorized_keys`，设置权限。
+5. 在电脑新开 CMD，确认 root 公钥登录免密码返回 `0`。
+
+详细教程区分了 Windows、Linux 和 iPad 中执行的命令，说明密码提示、公钥粘贴、Ctrl + D 结束输入、成功输出和连接错误。已有 root 密码登录的用户也有快捷安装方法。
+
+**已经配置成功时无需重做。** 在当前 Windows CMD 设置实际 IP 并验证即可：
 
 ```cmd
 set "IPAD_IP=192.168.1.50"
+ssh -o BatchMode=yes -o PreferredAuthentications=publickey -o IdentitiesOnly=yes -i "%USERPROFILE%\.ssh\fairplay_ipad" root@%IPAD_IP% "id -u"
 ```
 
-如果已经有 `%USERPROFILE%\.ssh\fairplay_ipad`，且它能免密码以 root 登录 iPad，跳过生成与安装公钥，直接验证。不要覆盖已有密钥。
-
-首次生成专用密钥：
-
-```cmd
-if not exist "%USERPROFILE%\.ssh" mkdir "%USERPROFILE%\.ssh"
-ssh-keygen -t ed25519 -f "%USERPROFILE%\.ssh\fairplay_ipad"
-```
-
-当前 Docker 入口不接入 SSH agent，需使用无口令的专用密钥：生成时在 passphrase 提示处直接回车两次。私钥保存在 Windows 本地；只有 `.pub` 公钥安装到 iPad。
-
-先用你已设置的 root SSH 密码登录确认连接；首次连接核对主机指纹后接受：
-
-```cmd
-ssh root@%IPAD_IP%
-```
-
-出现 iPad 的 root 提示符后，输入 `exit` 回到 Windows CMD，再安装公钥（此命令会要求 root 密码）：
-
-```cmd
-type "%USERPROFILE%\.ssh\fairplay_ipad.pub" | ssh root@%IPAD_IP% "umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys"
-```
-
-如果 root 密码登录尚未配置，请先在越狱环境中设置 root 密码和 SSH 登录方式；只能够以 mobile 登录还不满足这个脚本的条件。
-
-验证密钥登录（不应再要求密码）：
-
-```cmd
-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "%USERPROFILE%\.ssh\fairplay_ipad" root@%IPAD_IP% "id -u"
-```
-
-返回 `0` 才说明以 root 登录成功。
+直接返回 `0`，且全程不要求密码，才继续下面的 Docker 步骤。新开 CMD 窗口要重新设置 IP；仅 mobile 登录成功还不满足提取脚本要求。
 
 ## 5. 构建 Docker 镜像
 
@@ -213,29 +193,16 @@ ls -l bundle
 
 ### L3. 配置 SSH 密钥登录
 
-把示例 IP 换成自己的 iPad 地址；新开 Bash 终端需重新设置：
+首次配置请按 **[越狱 iPad SSH 详细教程](SSH.md)** 操作：第三节选择 Linux Bash 命令，然后通过 mobile 登录、`sudo -i` 切换 root，并将公钥安装到 root 的目录。无需预先允许 root 密码登录。
+
+如果已经配置成功，在当前 Linux Bash 中设置实际 IP 并验证：
 
 ```bash
 IPAD_IP=192.168.1.50
+ssh -o BatchMode=yes -o PreferredAuthentications=publickey -o IdentitiesOnly=yes -i "$HOME/.ssh/fairplay_ipad" "root@$IPAD_IP" 'id -u'
 ```
 
-已有可用的 `~/.ssh/fairplay_ipad` 时不要重新生成，直接验证登录。首次创建专用密钥：
-
-```bash
-mkdir -p "$HOME/.ssh"
-chmod 700 "$HOME/.ssh"
-ssh-keygen -t ed25519 -f "$HOME/.ssh/fairplay_ipad"
-```
-
-当前入口不接入 SSH agent，生成时在 passphrase 提示处直接回车两次，使用无口令的专用密钥。将公钥安装到 iPad（需要输入你设置的 root 密码，首次连接核对主机指纹）：
-
-```bash
-ssh-copy-id -i "$HOME/.ssh/fairplay_ipad.pub" "root@$IPAD_IP"
-chmod 600 "$HOME/.ssh/fairplay_ipad"
-ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$HOME/.ssh/fairplay_ipad" "root@$IPAD_IP" 'id -u'
-```
-
-最后一条应免密码返回 `0`。如果 root 登录未配置，先在越狱环境中完成配置；仅 mobile 用户能登录还不满足脚本要求。
+应免密码直接返回 `0`。私钥保存在当前 Linux 用户的 `~/.ssh/fairplay_ipad`；新开 shell 后需要重新设置 `IPAD_IP`。失败时先按详细教程的排错章节处理，再运行 Docker。
 
 ### L4. 构建并提取
 
