@@ -1,6 +1,8 @@
-# 获取 credential.bin：Windows + Docker + 越狱 iPad
+# 获取 credential.bin：Windows / Linux + Docker + 越狱 iPad
 
-本教程把已经走通的获取流程整理在一起：用 GitHub Actions 编译设备工具，在 Windows 的 Docker 容器里通过 Wi-Fi SSH 操作越狱 iPad，按指定应用的 Bundle ID 获取 `credential.bin`，最后导入本项目的解密凭证管理。
+本教程把已经走通的获取流程整理在一起：用 GitHub Actions 编译设备工具，在 Windows 或 Linux 的 Docker 容器里通过 Wi-Fi SSH 操作越狱 iPad，按指定应用的 Bundle ID 获取 `credential.bin`，最后导入本项目的解密凭证管理。
+
+第 2–7 节使用 Windows CMD；Linux 用户先阅读第 1 节的账号说明，再跳到 [Linux + Docker 获取步骤](#linux-docker)。
 
 不需要自己有 Mac。原生工具仍需 Xcode 编译，这一步由 GitHub 的 macOS runner 完成；Docker 负责运行 Python 和 SSH，提取实际在 iPad 上进行。
 
@@ -166,6 +168,125 @@ for %F in ("data\credential-us\credential.bin") do @echo %~zF bytes
 4. 用同一账号下载的原版 IPA 进行一次解密，确认是否匹配。服务端配置详见 [server/README.md](../../server/README.md)。
 
 无需把 SSH 密钥交给下载服务。私钥、生成的凭据和包含个人许可的文件不要上传 GitHub；本目录忽略 `data/`、`bundle/` 和生成的二进制文件，Docker 构建也只接收四个运行文件。
+
+<a id="linux-docker"></a>
+
+## Linux + Docker 获取步骤
+
+使用同一套脚本和设备工具，不需要在 Linux 上安装 Xcode 或重新编译 iOS 程序。以下命令在 **Linux Bash** 中执行，每条一行；不要使用 Windows 的 `%cd%`、`%USERPROFILE%`。
+
+### L1. 环境与网络
+
+Linux 主机需要 Git、OpenSSH 客户端、tar、unzip 和 Docker Engine。Ubuntu/Debian 可安装基础工具：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git openssh-client tar unzip
+```
+
+Docker 尚未安装时，按 [Docker Engine 官方安装说明](https://docs.docker.com/engine/install/)选择对应发行版。确认 `docker info` 能正常显示服务端信息；如果提示无权访问 Docker socket，下面的 `docker build`、`docker run` 前加 `sudo` 即可，无需把整个终端切换成 root。
+
+Linux 主机和容器都必须能访问 iPad 的 SSH 地址。局域网内可使用 iPad 的 Wi-Fi IP；云服务器不能直接访问家里的 `192.168.x.x`，需先建立能到达 iPad 的 VPN/路由，或改在同一局域网的 Linux 电脑上运行。
+
+iPad 需要保持越狱生效、已安装 OpenSSH、允许 root SSH 登录；目标应用必须由要提取凭据的 App Store 账号下载。应用选择与账号关系见第 1 节。
+
+### L2. 下载脚本和设备工具
+
+首次下载：
+
+```bash
+git clone https://github.com/blueskycrb/ipa-site-ios.git
+cd ipa-site-ios/tools/credential-retrieval
+```
+
+已有仓库则更新后进入 `tools/credential-retrieval`。后面的命令均在这个目录运行。
+
+按第 3 节在 GitHub Actions 运行 **Build credential tools**，下载 artifact `credential-tools`。将下载的 `credential-tools.zip` 放入当前目录，然后解压两层：
+
+```bash
+unzip credential-tools.zip
+tar -xzf credential-tools.tar.gz
+ls -l bundle
+```
+
+确认 `bundle/` 里直接包含第 3 节列出的五个文件。若已有解压好的 `bundle/`，复制到当前目录即可。
+
+### L3. 配置 SSH 密钥登录
+
+把示例 IP 换成自己的 iPad 地址；新开 Bash 终端需重新设置：
+
+```bash
+IPAD_IP=192.168.1.50
+```
+
+已有可用的 `~/.ssh/fairplay_ipad` 时不要重新生成，直接验证登录。首次创建专用密钥：
+
+```bash
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+ssh-keygen -t ed25519 -f "$HOME/.ssh/fairplay_ipad"
+```
+
+当前入口不接入 SSH agent，生成时在 passphrase 提示处直接回车两次，使用无口令的专用密钥。将公钥安装到 iPad（需要输入你设置的 root 密码，首次连接核对主机指纹）：
+
+```bash
+ssh-copy-id -i "$HOME/.ssh/fairplay_ipad.pub" "root@$IPAD_IP"
+chmod 600 "$HOME/.ssh/fairplay_ipad"
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$HOME/.ssh/fairplay_ipad" "root@$IPAD_IP" 'id -u'
+```
+
+最后一条应免密码返回 `0`。如果 root 登录未配置，先在越狱环境中完成配置；仅 mobile 用户能登录还不满足脚本要求。
+
+### L4. 构建并提取
+
+```bash
+mkdir -p data
+docker build -t fairplay-wifi-retriever .
+docker run --rm fairplay-wifi-retriever --help
+```
+
+帮助中应包含 `--bundle-id`。保持 iPad 解锁并留有复制目标 App 所需的空间；提取会重启 `fairplayd`，并清理本次创建的临时文件。
+
+例如读取 ChatGPT（`com.openai.chat`），以下是一整行命令：
+
+```bash
+docker run --rm --mount "type=bind,source=$(pwd)/bundle,target=/bundle,readonly" --mount "type=bind,source=$(pwd)/data,target=/data" --mount "type=bind,source=$HOME/.ssh/fairplay_ipad,target=/run/secrets/ipad_key,readonly" -e FAIRPLAY_SSH_KEY=/run/secrets/ipad_key fairplay-wifi-retriever --bundle /bundle --ssh-host "$IPAD_IP" --ssh-port 22 --bundle-id com.openai.chat --output-dir /data/credential-us
+```
+
+仅当这个 ChatGPT 确实由美区账号下载时，才把结果标记为 US。核对日志里的 `selected-app` 是否为 `com.openai.chat`，以及最后是否出现 `credential ready: /data/credential-us/credential.bin`。
+
+其他账号示例，读取指定应用并使用独立目录：
+
+```bash
+docker run --rm --mount "type=bind,source=$(pwd)/bundle,target=/bundle,readonly" --mount "type=bind,source=$(pwd)/data,target=/data" --mount "type=bind,source=$HOME/.ssh/fairplay_ipad,target=/run/secrets/ipad_key,readonly" -e FAIRPLAY_SSH_KEY=/run/secrets/ipad_key fairplay-wifi-retriever --bundle /bundle --ssh-host "$IPAD_IP" --ssh-port 22 --bundle-id com.ss.iphone.ugc.Live.lite --output-dir /data/credential-account2
+```
+
+`--bundle-id` 换成目标应用，`--output-dir` 换成新的目录。只需预先创建 `data/`，**不要预先创建 `data/credential-us/` 或 `data/credential-account2/`**。重复提取时可用 `/data/credential-us-2`。
+
+### L5. 文件权限、检查与导入
+
+结果位于当前目录的 `data/credential-us/credential.bin`。默认 rootful Docker 会以 root 身份写入，目录权限为 `700`、文件为 `600`，普通用户可能无法读取；成功后将这次输出交还给当前 Linux 用户：
+
+```bash
+sudo chown -R "$(id -u):$(id -g)" data/credential-us
+stat -c '%s bytes' data/credential-us/credential.bin
+```
+
+如果使用 rootless Docker 且当前用户已经能读取文件，可跳过 `chown`。提取到其他目录时，同步替换这两条命令的路径。
+
+应显示 `16 bytes`。然后按第 7 节从网页或客户端添加该文件，选择其实际对应的 Apple ID，并用同账号下载的原版 IPA 验证解密。16 字节和目录名都不能用来确认地区。
+
+### Linux 常见问题
+
+| 现象 | 排查方法 |
+|---|---|
+| `bind source path does not exist` | 确认当前目录、`bundle/`、`data/`、私钥路径正确；本文使用 `--mount`，缺少文件会直接报错。 |
+| `permission denied` 访问 Docker socket | 使用 `sudo docker ...`，保持在原用户终端执行，让 `$HOME` 仍指向保存私钥的用户目录。 |
+| 容器无法读取挂载文件，主机启用了 SELinux | 检查 SELinux 拒绝日志，按发行版配置容器 bind mount 的访问标签；不要直接给整个 `~/.ssh` 目录改标签或关闭 SELinux。 |
+| 主机能 SSH，容器却连接超时 | 检查 Docker 出站路由、防火墙和 VPN 路由；在原生 Linux Docker Engine 上，可临时给提取命令添加 `--network host` 诊断桥接网络问题。 |
+| 已显示成功，但普通用户打不开结果 | 按 L5 修复本次输出目录的属主，保留文件的私有权限。 |
+
+其他许可格式、Bundle ID、账号混淆等问题见下面的通用排查表。
 
 ## 常见问题
 
