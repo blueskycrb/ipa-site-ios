@@ -12,6 +12,7 @@
 | `mobile` | iPad 上的普通系统用户，Dopamine 环境通常先用它登录，再通过 `sudo` 管理系统。 |
 | `root` | iPad 的管理员用户，本提取脚本要求用它连接。 |
 | mobile 的终端密码 | 通常是配置 Dopamine 时设置的终端密码；不是 iPad 锁屏密码，也不是 Apple ID 密码。 |
+| root 密码 | 可在 NewTerm 中用 `sudo passwd root` 设置；不必与 mobile 密码相同。SSH 是否接受 root 密码登录还取决于服务端配置。 |
 | `fairplay_ipad` | 留在电脑上的 SSH 私钥，Docker 会读取它。不要把它粘贴到 iPad 或发到 GitHub。 |
 | `fairplay_ipad.pub` | 与私钥配对的公钥，需要加入 iPad 的 root 用户的 `authorized_keys`。 |
 
@@ -36,6 +37,27 @@
 5. 电脑和 iPad 连接到能互通的局域网。访客 Wi-Fi、AP 隔离、部分 VPN 会阻止设备互访。配置和提取期间保持 iPad 解锁。
 
 本教程走 Wi-Fi，不需要插 USB，也不需要在电脑安装 iTunes。若使用云端 Linux，必须先有到 iPad 所在网络的路由/VPN；云服务器不能直接访问家里的私有 IP。
+
+### 在 NewTerm 中设置 root 密码（可选）
+
+如果需要设置或更改 root 密码，可以在 iPad 的越狱包管理器安装适用于当前系统的 **NewTerm**，打开后在 **iPad 本地终端**执行：
+
+```sh
+sudo passwd root
+```
+
+按提示依次操作：
+
+1. 若出现 sudo 的 `Password:` 提示，输入当前 **mobile 的终端密码**，也就是用来取得管理员权限的密码。sudo 已缓存授权时可能跳过这一步。
+2. 出现 `New password:`（或类似提示），输入你要设置的 **新 root 密码**。
+3. 出现 `Retype new password:`（或类似提示），再次输入同一个新 root 密码。
+4. 确认命令没有报错、密码更新成功，再继续。输入密码时不显示字符或星号是正常现象。
+
+该命令设置的是 root 密码，不会把 mobile 的密码一起改掉。若 NewTerm 中 `id -u` 已返回 `0`，说明当前就是 root，也可以直接运行 `passwd root`。
+
+设置完成后，如果 OpenSSH 允许 root 密码登录，电脑可以用 `ssh root@iPad的实际IP` 和这个新密码连接，再按第七节快捷安装公钥。**设置了 root 密码，并不自动开启 root 的 SSH 密码登录**：例如 `PermitRootLogin prohibit-password` 仍只允许 root 使用公钥等非密码方式。
+
+如果 root 密码登录被服务端禁止，继续使用本教程的 mobile → `sudo -i` → 安装 root 公钥路线即可，不需要为此修改 SSH 的密码登录策略。Docker 提取最终仍以第六节的 **root 公钥免密验证**为准。
 
 ## 三、在电脑上生成专用密钥
 
