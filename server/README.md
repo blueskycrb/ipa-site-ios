@@ -54,7 +54,7 @@
 
 | 路径 | 内容 |
 |---|---|
-| `/app/server.py`、`/app/fairplay_fast.py`、`/app/static/` | 网站程序、解密入口和网页 |
+| `/app/server.py`、`/app/store_proof.py`、`/app/fairplay_fast.py`、`/app/static/` | 网站程序、认证初始化、解密入口和网页 |
 | `/app/fairplay/decrypt.py`、`core.py` | fairplay-decrypt 的解密脚本（构建时从 GitHub 按固定提交下载） |
 | `/usr/local/bin/ipatool` | Linux 版 ipatool（构建时从固定修复提交编译并运行测试，提交见 Dockerfile） |
 | `/usr/local/bin/ipatool-store-proof` | 本机生成 Apple Store 设备证明；不会接收 Apple ID 密码或验证码 |
@@ -249,7 +249,7 @@ docker compose up -d --build
 cd /opt/ipa-site                                   # 你的部署目录
 mkdir -p ../ipa-site-backup && cp -a server.py Dockerfile static ../ipa-site-backup/   # 先备份
 rm -rf /tmp/ipa-site-ios && git clone --depth 1 https://github.com/blueskycrb/ipa-site-ios.git /tmp/ipa-site-ios
-cd /tmp/ipa-site-ios/server && cp server.py fairplay_fast.py Dockerfile README.md .dockerignore .env.example /opt/ipa-site/ && cd /opt/ipa-site
+cd /tmp/ipa-site-ios/server && cp server.py store_proof.py fairplay_fast.py Dockerfile README.md .dockerignore .env.example /opt/ipa-site/ && cd /opt/ipa-site
 cp -r /tmp/ipa-site-ios/server/static/. static/
 diff /tmp/ipa-site-ios/server/docker-compose.yml docker-compose.yml   # 没输出就是一样的
 docker compose up -d --build
@@ -469,6 +469,10 @@ docker compose start
 ---
 
 ## 不用 Docker 直接运行
+
+注意：下面安装官方 ipatool release 的方式不包含本次 Linux 新认证修复。
+遇到 HTTP 204 / 无 Location 的 HTTP 301 时，Linux 推荐使用上述 Docker 部署；
+手动构建修复版需同时安装固定提交的 ipatool 和设备证明组件，并设置其两个环境变量（见 Dockerfile）。
 
 Windows / macOS / Linux 都可以：
 
