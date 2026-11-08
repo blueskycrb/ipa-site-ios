@@ -24,7 +24,7 @@ jobs:
       - name: Verify runtime tools
         run: |
           docker run --rm --entrypoint ipatool ipa-site:latest --version
-          docker run --rm --entrypoint python ipa-site:latest -m py_compile /app/server.py /app/store_proof.py
+          docker run --rm -e PYTHONPYCACHEPREFIX=/tmp/pycache --entrypoint python ipa-site:latest -m py_compile /app/server.py /app/store_proof.py
       - name: Export image
         run: docker save ipa-site:latest | gzip -1 > ipa-site-amd64.tar.gz
       - uses: actions/upload-artifact@v4
