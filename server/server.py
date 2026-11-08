@@ -41,6 +41,7 @@ import zlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from store_proof import StoreProofError, StoreProofSetup
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -421,6 +422,16 @@ class IpatoolError(Exception):
     pass
 
 
+_store_proof_setup = StoreProofSetup()
+
+
+def prepare_store_proof():
+    try:
+        _store_proof_setup.ensure(ipatool_env())
+    except StoreProofError as exc:
+        raise IpatoolError(str(exc)) from exc
+
+
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -455,6 +466,7 @@ def parse_output(stdout, stderr, returncode):
 
 def run_ipatool(args, timeout=120, account=None):
     """运行 ipatool 并返回解析后的 JSON 日志行列表；account 为空时用当前账号。"""
+    prepare_store_proof()
     try:
         proc = subprocess.run(
             ipatool_cmd(args), capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -476,6 +488,7 @@ class LoginSession:
     TTL = 10 * 60  # 等待验证码的最长时间
 
     def __init__(self, email, password, account, is_new):
+        prepare_store_proof()
         self.account, self.is_new = account, is_new
         self.proc = subprocess.Popen(
             ipatool_cmd(["auth", "login", "-e", email, "-p", password], interactive=True),
@@ -2778,6 +2791,11 @@ if __name__ == "__main__":
         raise SystemExit(1)
     exe = find_ipatool()
     print(f"ipatool: {exe or '未找到！'}")
+    try:
+        prepare_store_proof()
+    except IpatoolError as exc:
+        # Keep the website available for diagnosis; later operations can retry initialization.
+        print(str(exc), flush=True)
     print(f"下载目录: {DOWNLOAD_DIR}")
     if ACCESS_PASSWORD:
         print("访问密码: 已设置")

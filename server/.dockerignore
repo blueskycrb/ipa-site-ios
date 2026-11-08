@@ -8,3 +8,7 @@ __pycache__/
 *.pyc
 start.bat
 fairplay/
+data/
+.backups/
+*.tar.gz
+.env.*

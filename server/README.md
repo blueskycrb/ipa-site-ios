@@ -26,10 +26,11 @@
 |---|---|---|
 | `server.py` | 网站程序：网页接口、下载队列、Alist 上传、安装链接、证书签名、解密、连 Apple 用的中转 | 不改 |
 | `fairplay_fast.py` | 解密的入口：用多个 CPU 核运行 fairplay-decrypt 的 `decrypt.py`，结果和原来逐字节相同 | 不改 |
+| `store_proof.py` | 首次启动时初始化 Linux Apple 设备证明组件；初始化失败时允许后续重试 | 不改 |
 | `static/index.html` | 首页：搜索、下载任务、已下载文件、解密凭证 | 不改 |
 | `static/sign.html` | 证书签名页（`/sign`） | 不改 |
 | `static/app.css` | 网页样式 | 不改 |
-| `Dockerfile` | 构建镜像：编译 zsign，下载 ipatool 和 fairplay-decrypt 的解密脚本（都是固定版本），安装 cryptography | 不改 |
+| `Dockerfile` | 构建镜像：按固定提交编译 ipatool、Linux 设备证明组件和 zsign，下载解密脚本，安装 cryptography | 不改 |
 | `docker-compose.yml` | 容器配置：端口、数据卷、MAC 地址、环境变量；另有可选的 Caddy（HTTPS） | 一般不改，配置都写在 `.env` |
 | `.env.example` | 配置模板，每一项都有注释 | 复制成 `.env` 再改 |
 | `Caddyfile` | 可选的 Caddy 自动 HTTPS 配置 | 用自带 Caddy 时才用到 |
@@ -55,7 +56,9 @@
 |---|---|
 | `/app/server.py`、`/app/fairplay_fast.py`、`/app/static/` | 网站程序、解密入口和网页 |
 | `/app/fairplay/decrypt.py`、`core.py` | fairplay-decrypt 的解密脚本（构建时从 GitHub 按固定提交下载） |
-| `/usr/local/bin/ipatool` | Linux 版 ipatool（构建时从 GitHub releases 下载并校验 SHA-256） |
+| `/usr/local/bin/ipatool` | Linux 版 ipatool（构建时从固定修复提交编译并运行测试，提交见 Dockerfile） |
+| `/usr/local/bin/ipatool-store-proof` | 本机生成 Apple Store 设备证明；不会接收 Apple ID 密码或验证码 |
+| `/usr/share/ipatool/store-proof-source/` | 设备证明组件的对应源码、NOTICE 和 LGPL 许可证 |
 | `/usr/local/bin/zsign` | 证书签名工具（构建时编译） |
 | `/data` | 数据目录，挂载到 Docker 卷或 `IPA_DATA` 指定的目录 |
 
@@ -67,6 +70,7 @@
 ├── accounts/<id>/.ipatool/       之后添加的其他 Apple ID 的登录状态，每个账号一个目录
 ├── accounts.json                 账号列表和当前使用的账号
 ├── .keychain-passphrase          解密上面登录状态的口令（首次启动自动生成）
+├── .config/ipatool/store-proof/  Apple 新认证的设备身份、注册状态和校验过的运行库；自动生成，重建容器时保留
 ├── .link-secret                  安装链接的签名密钥（自动生成）
 ├── .version-cache.json           查过的历史版本号和发布日期
 ├── certs/<id>/                   签名证书：cert.p12、profile.mobileprovision、cert.json（含证书密码）
@@ -84,6 +88,7 @@
 | 路径 | 能删吗 | 外传风险 |
 |---|---|---|
 | `.ipatool/`、`accounts/`、`.keychain-passphrase` | 删了要重新登录 Apple ID | **高**：两者合在一起就是你的 Apple ID 登录状态 |
+| `.config/ipatool/store-proof/` | 不要删；备份迁移时一起带走 | **高**：属于本机的设备证明身份和注册状态，不要提交或分享 |
 | `certs/` | 删了要重新导入证书 | **高**：含证书和证书密码 |
 | `fairplay/*.bin` | 删了要重新添加凭证 | **高**：能解密这个 Apple ID 下载的所有 App |
 | `downloads/`、`signed/` | 可以，只是文件没了 | 低 |
@@ -100,6 +105,32 @@
 - 一台 Linux 服务器（x86_64 或 ARM64，NAS、软路由、VPS 都行），装好 Docker 和 Docker Compose 插件（`docker compose version` 能输出版本号）
 - 构建镜像时要能访问 GitHub（下载 ipatool、zsign、解密脚本）和 PyPI（安装 cryptography）
 - 下载、登录要能访问 Apple 的服务器；网络不稳也没关系，程序会自动换节点
+
+### Apple 新认证兼容说明（2026 年 11 月）
+
+旧版 ipatool 2.7.0 的认证流程可能返回 HTTP 204 空响应、HTTP 301 但没有 Location，
+这类错误与单纯的 TLS 握手超时不同。仅切换 DNS、反复重试或修改 User-Agent 不能保证恢复下载。
+
+当前 Dockerfile 临时采用 [trikesh32/ipatool 的 Linux 修复](https://github.com/trikesh32/ipatool/pull/1)，
+固定到 `175c3e92a58a38fe538f4d94e785de4e575c6972`，不跟随分支自动更新。
+它使用新的原生认证入口、本机 Store AMD 设备证明，以及受限的设备注册重试。
+这是尚未合入官方主线的兼容方案，不能保证所有账号和新应用授权场景都可用；
+正式发布前在实际部署环境验证登录及已拥有应用的完整下载，不把「登录成功」当作下载验证。
+
+- 首次启动会从 Apple 官方下载 Apple Music APK，提取两个运行库并校验源码中固定的 SHA-256。
+  库有变化时会拒绝使用，需要审查新库后更新固定哈希；不会跳过 TLS 或哈希校验。
+- 初始化可能需要几分钟。日志出现「Apple 新认证组件已就绪」后再使用。
+  新设备可能还要下载 ipatool 自己的 SAP 资源，首次登录或下载也会比后续慢。
+- 设备证明在 NAS 本地生成，不需要把账号、密码或验证码交给第三方认证服务。
+  `/data/.config/ipatool/store-proof/` 供同一设备的账号使用，账号钥匙串仍各自分开。
+- 更新时保留原有 `.env`、`IPA_MAC_ADDRESS` 和整个 `/data`。不要删除账号来尝试修复接口报错。
+  若旧会话失效而确实需要验证码，在网页或 iPhone 客户端给原账号重新登录即可。
+- 初始化失败时可运行 `docker compose exec ipa-site ipatool-store-proof --setup` 诊断。
+  不要公开 `--headers` 输出、设备状态文件、Apple ID 密码或验证码。
+- GitHub Actions 的 **Build and test server** 会测试并构建 amd64 镜像，提供七天有效的
+  `ipa-site-amd64` 构建产物。解压后用 `gzip -dc ipa-site-amd64.tar.gz | docker load` 导入，
+  再在原部署目录运行 `docker compose up -d --no-build --no-deps ipa-site`。
+  只更新本服务；ARM64 可在对应机器用 Dockerfile 构建，本文不声称已验证 ARM64 的实际认证。
 
 ### 第 1 步：获取代码
 

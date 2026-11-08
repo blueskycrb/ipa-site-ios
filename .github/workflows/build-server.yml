@@ -1,0 +1,35 @@
+name: Build and test server
+
+on:
+  push:
+    branches: [main, fix/native-store-auth]
+    paths:
+      - "server/**"
+      - ".github/workflows/build-server.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test helper initialization
+        run: python3 -m unittest discover -s server -p 'test_*.py' -v
+      - name: Build amd64 image and test pinned ipatool
+        run: docker build --progress=plain -t ipa-site:latest server
+      - name: Verify runtime tools
+        run: |
+          docker run --rm --entrypoint ipatool ipa-site:latest --version
+          docker run --rm --entrypoint python ipa-site:latest -m py_compile /app/server.py /app/store_proof.py
+      - name: Export image
+        run: docker save ipa-site:latest | gzip -1 > ipa-site-amd64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipa-site-amd64
+          path: ipa-site-amd64.tar.gz
+          compression-level: 0
+          retention-days: 7
