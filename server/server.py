@@ -832,13 +832,20 @@ def download_worker():
             continue
         control = job["_control"]
         with control.lock:
+            if control.cancelled:
+                job_queue.task_done()
+                continue
             if control.paused:
                 job_queue.put(job_id)
                 job_queue.task_done()
-                time.sleep(0.2)
-                continue
-            job["status"] = "running"
-            job["startedAt"] = time.time()
+                requeued = True
+            else:
+                requeued = False
+                job["status"] = "running"
+                job["startedAt"] = time.time()
+        if requeued:
+            time.sleep(0.2)
+            continue
         work = PARTIAL_DIR / job_id
         work.mkdir(parents=True, exist_ok=True)
         job["workDir"] = work
@@ -1532,10 +1539,6 @@ def enqueue_sign(source, name, cert_id, **extra):
         extra["copyName"] = validate_copy_name(extra.get("copyName", ""))
     except ParallelInstallError as exc:
         raise IpatoolError(str(exc)) from exc
-    if extra.get("parallelInstall") and not extra.get("parallelBundleID"):
-        pattern = (cert.get("appID") or "").partition(".")[2]
-        if not pattern.endswith("*") or pattern.count("*") != 1:
-            raise IpatoolError("并存安装需要通配描述文件（App ID 含 *），当前证书描述文件不支持")
     if not extra.get("fromSigned"):   # 用签好的文件重签时不需要原文件
         if source == "server" and not (DOWNLOAD_DIR / name).is_file():
             raise IpatoolError("服务器上没有这个文件")
@@ -1623,6 +1626,11 @@ def run_sign(job):
         if job.get("parallelInstall"):
             try:
                 parallel = parallel_identity(info, cert, job.get("copyName", ""), previous=job)
+                for record in load_signed_meta().values():
+                    if (record.get("parallelInstall") and record.get("teamID") == cert.get("teamID")
+                            and record.get("bundleID") == parallel["parallelBundleID"]
+                            and record.get("originalBundleID") != parallel["originalBundleID"]):
+                        raise ParallelInstallError("此描述文件的固定标识已用于另一个应用副本，不能再分配给这个应用；请使用其他描述文件或通配描述文件")
                 prepared = work / "parallel.ipa"
                 prepare_parallel_ipa(src, prepared, parallel)
             except (ParallelInstallError, plistlib.InvalidFileException) as exc:

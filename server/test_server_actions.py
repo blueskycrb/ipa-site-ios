@@ -9,6 +9,7 @@ import socket
 import struct
 import subprocess
 import sys
+import shutil
 import tempfile
 import time
 import unittest
@@ -54,6 +55,11 @@ class ServerActionTests(unittest.TestCase):
         certdir.mkdir(parents=True)
         (certdir / 'cert.json').write_text(json.dumps({'id':'aabbccdd','password':'fixture','appID':'PREFIX.*','teamID':'TEAM',
             'certExpires':time.time()+86400,'profileExpires':time.time()+86400,'matchesProfile':True}))
+        fixed = cls.root / 'certs' / '11223344'
+        fixed.mkdir()
+        fixed.joinpath('cert.json').write_text(json.dumps({'id':'11223344','password':'fixture',
+            'appID':'PREFIX.org.personal.copy','teamID':'TEAM','certExpires':time.time()+86400,
+            'profileExpires':time.time()+86400,'matchesProfile':True}))
         with socket.socket() as s:
             s.bind(('127.0.0.1', 0))
             port = s.getsockname()[1]
@@ -148,6 +154,22 @@ class ServerActionTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError):
             self.request('/api/jobs/no-such-job', {'action':'invalid'})
 
+    def test_paused_queued_job_does_not_block_next_and_can_be_deleted(self):
+        first=self.download()
+        self.wait(lambda:self.job(first)['status']=='running')
+        second=self.download()
+        self.request('/api/jobs/'+second, {'action':'pause'})
+        self.assertEqual(self.job(second)['status'],'paused')
+        third=self.download()
+        try:
+            self.request('/api/jobs/'+first, {'action':'cancel'})
+            self.wait(lambda:self.job(third)['status']=='running')
+            self.assertEqual(self.job(second)['status'],'paused')
+            self.request('/api/jobs/'+second, method='DELETE')
+            self.assertFalse(any(j['id']==second for j in self.request('/api/jobs')['jobs']))
+        finally:
+            self.request('/api/jobs/'+third, {'action':'cancel'})
+
     def test_parallel_sign_and_resign_keep_identity_and_original(self):
         source=self.downloads/'original.ipa'
         with zipfile.ZipFile(source,'w') as z:
@@ -171,6 +193,29 @@ class ServerActionTests(unittest.TestCase):
         self.assertEqual(first['key'],second['key'])
         signed=self.request('/api/signed')['items']
         self.assertTrue(next(x for x in signed if x['key']==first['key'])['parallelInstall'])
+
+    def test_fixed_profile_rejects_assignment_to_a_second_app(self):
+        def source(name,bundle):
+            p=self.downloads/name
+            with zipfile.ZipFile(p,'w') as z:
+                z.writestr('Payload/Test.app/Info.plist',plistlib.dumps({'CFBundleIdentifier':bundle,
+                    'CFBundleName':'Fixture','CFBundleExecutable':'Test','CFBundleShortVersionString':'1.0'}))
+                z.writestr('Payload/Test.app/Test',struct.pack('<IIIIIIII',0xfeedfacf,0x100000c,0,2,0,0,0,0))
+            return p
+        first=source('fixed-first.ipa','com.example.first')
+        second=source('fixed-second.ipa','com.example.second')
+        def sign(path):
+            result=self.request('/api/sign',{'source':'server','name':path.name,'cert':'11223344',
+                                             'parallelInstall':True})['job']
+            return self.wait(lambda:next((j for j in self.request('/api/sign/jobs')['jobs']
+                if j['id']==result['id'] and j['status'] in ('done','error')),None))
+        created=sign(first)
+        self.assertEqual(created['status'],'done')
+        self.assertEqual(created['bundleID'],'org.personal.copy')
+        rejected=sign(second)
+        self.assertEqual(rejected['status'],'error')
+        self.assertIn('另一个应用副本',rejected['error'])
+        self.assertTrue(first.is_file() and second.is_file())
 
 
 if __name__=='__main__':

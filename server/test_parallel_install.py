@@ -27,7 +27,9 @@ class ParallelInstallTests(unittest.TestCase):
         self.assertTrue(profile_allows(cert["appID"], identity["parallelBundleID"]))
         self.assertTrue(identity["parallelBundleID"].startswith("org.personal."))
 
-    def test_explicit_profile_cannot_create_copy(self):
+    def test_explicit_profile_uses_exact_identity_and_cannot_reuse_original_identity(self):
+        identity = parallel_identity(self.info, {"appID": "PREFIX.org.personal.copy"})
+        self.assertEqual(identity["parallelBundleID"], "org.personal.copy")
         with self.assertRaises(ParallelInstallError):
             parallel_identity(self.info, {"appID": "PREFIX.com.example.reader"})
 

@@ -35,10 +35,14 @@ def parallel_identity(info, cert, copy_name="", previous=None):
     target = previous.get("parallelBundleID")
     if not target:
         pattern = (cert.get("appID") or "").partition(".")[2]
-        if "*" not in pattern or not pattern.endswith("*") or pattern.count("*") != 1:
-            raise ParallelInstallError("并存安装需要允许修改应用标识的通配描述文件（App ID 含 *）；当前描述文件不支持")
-        target = original + ".ipasitecopy"
-        if len(target) > 255 or not profile_allows(cert.get("appID"), target):
+        if "*" not in pattern:
+            # Dedicated profiles permit exactly one app identity.
+            target = pattern
+        elif pattern.endswith("*") and pattern.count("*") == 1:
+            target = original + ".ipasitecopy"
+        else:
+            raise ParallelInstallError("描述文件的应用标识格式无效")
+        if "*" in pattern and (len(target) > 255 or not profile_allows(cert.get("appID"), target)):
             # A restricted wildcard can only sign apps within its own namespace.
             target = pattern[:-1] + "ipasitecopy." + hashlib.sha256(original.encode()).hexdigest()[:16]
     if (target == original or len(target) > 255

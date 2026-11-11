@@ -96,7 +96,7 @@ $("#parallelInstall").onchange = () => {
   const enabled = $("#parallelInstall").checked;
   $("#copyName").hidden = !enabled;
   $("#parallelHint").textContent = enabled
-    ? "保留官方版，生成独立副本；需要 App ID 带 * 的通配描述文件。副本会移除分享扩展、小组件、Watch、App Clip 和原应用链接注册。部分应用的登录、推送、内购可能不可用。以后更新副本时保留同一标识。"
+    ? "保留官方版，生成独立副本；通配描述文件支持不同应用，固定 App ID 只能分配给一个应用副本。副本会移除分享扩展、小组件、Watch、App Clip 和原应用链接注册。部分应用的登录、推送、内购可能不可用。以后更新副本时保留同一标识。"
     : "保留应用原标识。个人证书不能直接覆盖 App Store 官方版，可选择并存安装。";
 };
 function toast(msg) {

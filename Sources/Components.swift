@@ -87,7 +87,7 @@ struct SignButton: View {
     private var selectedCertificate: CertInfo? { certs.first { $0.id == selectedCert } }
     private var canSign: Bool {
         guard let cert = selectedCertificate, !cert.isExpired, cert.matchesProfile != false else { return false }
-        return !parallelInstall || (serverSupportsParallel && cert.appID?.hasSuffix("*") == true && copyName.count <= 40)
+        return !parallelInstall || (serverSupportsParallel && cert.appID?.isEmpty == false && copyName.count <= 40)
     }
 
     private var signable: Bool {
@@ -121,7 +121,7 @@ struct SignButton: View {
                                             if value.count > 40 { copyName = String(value.prefix(40)) }
                                         }
                                     if selectedCertificate?.appID?.hasSuffix("*") != true {
-                                        Text("当前描述文件不支持并存安装，请选择 App ID 带 * 的通配描述文件。").foregroundColor(.red)
+                                        Text("当前描述文件只有一个固定应用标识，只能分配给一个应用副本。若该标识与官方版相同，或已分配给其他副本，服务器会拒绝签名。").font(.caption).foregroundColor(.secondary)
                                     }
                                 }
                             } footer: {
