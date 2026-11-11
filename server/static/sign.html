@@ -43,12 +43,17 @@
         <label class="small muted">用证书 <select id="certSel"></select></label>
         <label class="btn sm" id="ipaUploadBtn">上传 IPA<input type="file" id="ipaFile" accept=".ipa,.tipa" hidden></label>
       </div>
+      <div class="toolbar">
+        <label class="small"><input type="checkbox" id="parallelInstall"> 与原应用并存安装</label>
+        <input type="text" id="copyName" maxlength="40" placeholder="副本名称（留空自动添加“副本”）" hidden>
+      </div>
+      <div id="parallelHint" class="small muted" style="padding:0 12px 10px">保留应用原标识。个人证书不能直接覆盖 App Store 官方版，可选择并存安装。</div>
       <div id="ipaUploadMsg" class="small" style="padding:0 12px 8px" hidden></div>
       <div class="list" id="appList"><div class="empty">加载中…</div></div>
       <div id="more" style="padding:8px 12px" hidden><button class="btn sm" id="moreBtn">加载更多</button></div>
     </div>
     <div class="notice small muted" style="margin-top:12px">
-      App Store 原版 IPA 是加密的，重签后打开会闪退，原版请回下载站用「系统安装」。证书签名适合 Alist 里的改版 / 砸壳 IPA。
+      App Store 原版 IPA 需要先解密再重签。签名支持原标识安装或与官方版并存，副本的数据与官方版独立。
       个人或开发者证书需要描述文件里包含你手机的 UDID；企业证书不用，但可能被苹果吊销（掉签）。
     </div>
   </section>
@@ -87,6 +92,13 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmtSize = n => n == null ? "" : n > 1<<30 ? (n/(1<<30)).toFixed(2)+" GB" : (n/(1<<20)).toFixed(1)+" MB";
 const fmtDate = t => t ? new Date(t * 1000).toLocaleDateString() : "?";
+$("#parallelInstall").onchange = () => {
+  const enabled = $("#parallelInstall").checked;
+  $("#copyName").hidden = !enabled;
+  $("#parallelHint").textContent = enabled
+    ? "保留官方版，生成独立副本；需要 App ID 带 * 的通配描述文件。副本会移除分享扩展、小组件、Watch、App Clip 和原应用链接注册。部分应用的登录、推送、内购可能不可用。以后更新副本时保留同一标识。"
+    : "保留应用原标识。个人证书不能直接覆盖 App Store 官方版，可选择并存安装。";
+};
 function toast(msg) {
   const t = $("#toast"); t.textContent = msg; t.classList.add("show");
   clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 3500);
@@ -237,7 +249,8 @@ $("#appList").onclick = async e => {
   const b = e.target.closest("[data-sign]"); if (!b) return;
   const cert = $("#certSel").value;
   if (!cert) return toast("请先上传证书");
-  const r = await api("/api/sign", { body: { source: tab, name: b.dataset.sign, cert } });
+  const r = await api("/api/sign", { body: { source: tab, name: b.dataset.sign, cert,
+    parallelInstall: $("#parallelInstall").checked, copyName: $("#copyName").value.trim() } });
   if (!r.ok) return toast(r.error);
   toast("已加入签名队列");
   pollJobs();
@@ -284,7 +297,7 @@ async function loadSigned() {
       ${s.icon ? `<img src="${esc(s.icon)}" alt="">` : ""}
       <div class="grow">
         <div class="ellip">${esc(s.appName || s.sourceName)} <span class="muted small">${esc(s.version || "")}</span></div>
-        <div class="small muted ellip">${esc(s.bundleID || "")} · ${fmtSize(s.size)} · ${esc(s.certLabel || "证书已删除")}${s.certExpires ? ` · 到 ${fmtDate(s.certExpires)}` : ""}</div>
+        <div class="small muted ellip">${esc(s.bundleID || "")} · ${fmtSize(s.size)} · ${esc(s.certLabel || "证书已删除")}${s.certExpires ? ` · 到 ${fmtDate(s.certExpires)}` : ""}${s.parallelInstall ? " · 并存副本" : ""}</div>
         ${dead ? `<div class="small err">证书${s.certDeleted ? "已删除" : "已过期"}，装不上了：在上面「用证书」选新证书，点「换证书重签」</div>` : ""}
         <div class="actions">${dead ? "" : linkButtons(s)}
           <button class="btn sm" data-resign="${esc(s.key)}" data-team="${esc(s.teamID || "")}">换证书重签</button>

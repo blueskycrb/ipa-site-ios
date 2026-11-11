@@ -10,6 +10,8 @@
 - 下载完自动上传到 Alist（可选），可浏览 Alist 目录、用网盘直链下载
 - iPhone 一键安装：系统安装（itms-services，需要 HTTPS）或交给 TrollStore 安装
 - 证书签名：上传自己的 p12 证书 + 描述文件，用 zsign 重签后安装（网页 `/sign`）
+- 并存安装：签名时生成独立副本，保留手机上的 App Store 官方版；支持副本名称和以后沿用原标识重签更新
+- 下载任务支持暂停 / 继续、取消和单独删除记录；删除任务不会删除已下载的 IPA
 - 解密：用 [fairplay-decrypt](https://github.com/EthanArbuckle/fairplay-decrypt) 和 Apple ID 凭证离线解密 App Store 原版 IPA，凭证按地区（US、CN…）管理，自动用下载账号对应的凭证
 - 网络不稳时自动避开连不上的 Apple 节点（见[连不上 Apple 时](#连不上-apple-时)）
 - 访问密码、IPv4 / IPv6、多任务并行下载
@@ -27,6 +29,8 @@
 | `server.py` | 网站程序：网页接口、下载队列、Alist 上传、安装链接、证书签名、解密、连 Apple 用的中转 | 不改 |
 | `fairplay_fast.py` | 解密的入口：用多个 CPU 核运行 fairplay-decrypt 的 `decrypt.py`，结果和原来逐字节相同 | 不改 |
 | `store_proof.py` | 首次启动时初始化 Linux Apple 设备证明组件；初始化失败时允许后续重试 | 不改 |
+| `parallel_install.py` | 生成并存副本，验证描述文件范围，整理副本名称和扩展组件 | 不改 |
+| `download_control.py` | 按任务控制 Linux 下载进程组，支持暂停、继续和取消 | 不改 |
 | `static/index.html` | 首页：搜索、下载任务、已下载文件、解密凭证 | 不改 |
 | `static/sign.html` | 证书签名页（`/sign`） | 不改 |
 | `static/app.css` | 网页样式 | 不改 |
@@ -249,7 +253,7 @@ docker compose up -d --build
 cd /opt/ipa-site                                   # 你的部署目录
 mkdir -p ../ipa-site-backup && cp -a server.py Dockerfile static ../ipa-site-backup/   # 先备份
 rm -rf /tmp/ipa-site-ios && git clone --depth 1 https://github.com/blueskycrb/ipa-site-ios.git /tmp/ipa-site-ios
-cd /tmp/ipa-site-ios/server && cp server.py store_proof.py fairplay_fast.py Dockerfile README.md .dockerignore .env.example /opt/ipa-site/ && cd /opt/ipa-site
+cd /tmp/ipa-site-ios/server && cp server.py store_proof.py parallel_install.py download_control.py fairplay_fast.py Dockerfile README.md .dockerignore .env.example /opt/ipa-site/ && cd /opt/ipa-site
 cp -r /tmp/ipa-site-ios/server/static/. static/
 diff /tmp/ipa-site-ios/server/docker-compose.yml docker-compose.yml   # 没输出就是一样的
 docker compose up -d --build

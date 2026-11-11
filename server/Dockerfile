@@ -64,7 +64,7 @@ COPY --from=ipatool-build /src/tools/store-proof /usr/share/ipatool/store-proof-
 RUN useradd --create-home --home-dir /data --uid 1000 app
 
 WORKDIR /app
-COPY server.py fairplay_fast.py store_proof.py ./
+COPY server.py fairplay_fast.py store_proof.py parallel_install.py download_control.py ./
 COPY static ./static
 
 ENV HOME=/data \

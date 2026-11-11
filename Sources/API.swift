@@ -99,6 +99,8 @@ struct Job: Decodable, Identifiable {
     let finishedAt: Double?
     let purchased: Bool?
     let accountEmail: String?
+    let controlsSupported: Bool?
+    let pauseSupported: Bool?
 }
 
 struct UploadRecord: Decodable {
@@ -217,6 +219,7 @@ struct SignedItem: Decodable, Identifiable {
     let certDeleted: Bool?
     let certExpires: Double?
     let teamID: String?
+    let parallelInstall: Bool?
     let installURL: String?
     let trollstoreURL: String?
 
@@ -250,6 +253,7 @@ final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate {
 struct CertsResponse: Decodable {
     let zsign: Bool?
     let installEnabled: Bool?
+    let parallelInstallSupported: Bool?
     let certs: [CertInfo]
 }
 
@@ -464,6 +468,14 @@ enum API {
         _ = try await send(Envelope.self, request("/api/jobs/clear", method: "POST", body: [:]))
     }
 
+    static func controlJob(_ id: String, action: String) async throws {
+        if action == "delete" {
+            _ = try await send(Envelope.self, request("/api/jobs/" + encode(id), method: "DELETE"))
+        } else {
+            _ = try await send(Envelope.self, request("/api/jobs/" + encode(id), method: "POST", body: ["action": action]))
+        }
+    }
+
     static func files() async throws -> [RemoteFile] {
         try await send(FilesResponse.self, request("/api/files")).files ?? []
     }
@@ -520,8 +532,10 @@ enum API {
     }
 
     /// 用证书签名一个 IPA；source 为 alist 或 server
-    static func sign(source: String, name: String, cert: String) async throws -> SignJob {
-        let body = ["source": source, "name": name, "cert": cert]
+    static func sign(source: String, name: String, cert: String,
+                     parallelInstall: Bool = false, copyName: String = "") async throws -> SignJob {
+        let body: [String: Any] = ["source": source, "name": name, "cert": cert,
+                                   "parallelInstall": parallelInstall, "copyName": copyName]
         return try await send(SignJobResponse.self, request("/api/sign", method: "POST", body: body)).job
     }
 

@@ -21,7 +21,7 @@ struct JobsView: View {
                     }
                     ForEach(jobs) { job in
                         JobRow(job: job, installEnabled: installEnabled, decryptEnabled: decryptEnabled,
-                               showAccount: showAccount, toast: $toast)
+                               showAccount: showAccount, toast: $toast, onChange: { await refresh() })
                     }
                 } header: {
                     if !decryptJobs.isEmpty { Text("下载") }
@@ -79,6 +79,11 @@ struct JobRow: View {
     let decryptEnabled: Bool
     let showAccount: Bool
     @Binding var toast: String?
+    let onChange: () async -> Void
+    @State private var controlling = false
+    @State private var confirmDelete = false
+
+    private var active: Bool { ["queued", "running", "paused"].contains(job.status) }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -90,7 +95,7 @@ struct JobRow: View {
                 if showAccount, let email = job.accountEmail {
                     Text("账号：\(email)").font(.caption2).foregroundColor(.secondary).lineLimit(1)
                 }
-                if job.status == "running" {
+                if job.status == "running" || job.status == "paused" {
                     if let size = job.size, size > 0, let done = job.downloaded {
                         ProgressView(value: min(done / size, 1))
                     } else {
@@ -102,6 +107,22 @@ struct JobRow: View {
                 }
                 if let err = job.error {
                     Text(err).font(.caption2).foregroundColor(.red)
+                }
+                if job.controlsSupported == true {
+                    HStack {
+                        if active {
+                            if job.pauseSupported == true {
+                                Button(job.status == "paused" ? "继续" : "暂停") {
+                                    Task { await control(job.status == "paused" ? "resume" : "pause") }
+                                }
+                            }
+                            Button("取消", role: .destructive) { Task { await control("cancel") } }
+                        }
+                        Button("删除任务", role: .destructive) { confirmDelete = true }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(controlling)
                 }
                 if job.status == "done", let file = job.file {
                     HStack {
@@ -118,12 +139,33 @@ struct JobRow: View {
             }
         }
         .padding(.vertical, 2)
+        .confirmationDialog("删除这个下载任务？", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("删除任务", role: .destructive) { Task { await control("delete") } }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(active ? "会停止下载并清理未完成的临时文件，已下载好的 IPA 保留。" : "只删除任务记录，已下载好的 IPA 保留。")
+        }
+    }
+
+    private func control(_ action: String) async {
+        controlling = true
+        do {
+            try await API.controlJob(job.id, action: action)
+            await onChange()
+        } catch {
+            toast = error.localizedDescription
+        }
+        controlling = false
     }
 
     private var statusText: String {
         switch job.status {
         case "queued":
             return "排队中"
+        case "paused":
+            return "已暂停" + ((job.downloaded ?? 0) > 0 ? " · " + fmtSize(job.downloaded) : "")
+        case "cancelled":
+            return "已取消"
         case "running":
             var s = "下载中"
             if let d = job.downloaded, d > 0 {

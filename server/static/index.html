@@ -269,14 +269,14 @@ async function pollJobs() {
   if (!r.ok) return;
   const box = $("#jobs");
   box.innerHTML = r.jobs.length ? r.jobs.map(j => {
-    let st = { queued: "排队中", running: "下载中", done: "完成", error: "失败" }[j.status];
+    let st = { queued: "排队中", running: "下载中", paused: "已暂停", cancelled: "已取消", done: "完成", error: "失败" }[j.status] || j.status;
     let prog = "";
-    if (j.status === "running") {
+    if (j.status === "running" || j.status === "paused") {
       const pct = j.size && j.downloaded ? Math.min(99, j.downloaded / j.size * 100) : null;
       prog = pct != null ? `<div class="prog"><div style="width:${pct.toFixed(1)}%"></div></div>`
                          : `<div class="prog indet"><div></div></div>`;
       if (j.downloaded) st += ` ${fmtSize(j.downloaded)}${j.size ? " / " + fmtSize(j.size) : ""}`;
-      if (j.speed) st += ` · ${fmtSize(j.speed)}/s`;
+      if (j.speed && j.status !== "paused") st += ` · ${fmtSize(j.speed)}/s`;
     }
     return `<div class="row">
       ${j.icon ? `<img src="${esc(j.icon)}" alt="">` : ""}
@@ -287,16 +287,33 @@ async function pollJobs() {
         ${j.note ? `<div class="small muted">${esc(j.note)}</div>` : ""}
         ${j.error ? `<div class="small err">${esc(j.error)}</div>` : ""}
         ${prog}
+        ${j.controlsSupported ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          ${["queued", "running", "paused"].includes(j.status) ? `${j.pauseSupported ? `<button class="btn sm" data-job="${esc(j.id)}" data-action="${j.status === "paused" ? "resume" : "pause"}">${j.status === "paused" ? "继续" : "暂停"}</button>` : ""}<button class="btn sm" data-job="${esc(j.id)}" data-action="cancel">取消</button>` : ""}
+          <button class="btn sm" data-job="${esc(j.id)}" data-action="delete">删除任务</button>
+        </div>` : ""}
       </div>
       ${j.status === "done" && j.file ? `<a class="btn sm" href="/files/${encodeURIComponent(j.file)}">保存</a>` : ""}
     </div>`;
   }).join("") : `<div class="empty">暂无任务</div>`;
-  const active = r.jobs.some(j => j.status === "queued" || j.status === "running");
+  const active = r.jobs.some(j => ["queued", "running", "paused"].includes(j.status));
   const doneKey = r.jobs.filter(j => j.status === "done").map(j => j.id).join();
   if (doneKey !== pollJobs.doneKey) { pollJobs.doneKey = doneKey; loadFiles(); }
   if (active) pollTimer = setTimeout(pollJobs, 1000);
 }
 $("#clearJobs").onclick = async () => { await api("/api/jobs/clear", { body: {} }); pollJobs(); };
+$("#jobs").onclick = async e => {
+  const b = e.target.closest("[data-job][data-action]"); if (!b) return;
+  const action = b.dataset.action;
+  if (action === "delete" && !confirm("删除这个任务？进行中的下载会停止，已下载好的 IPA 保留。")) return;
+  b.disabled = true;
+  try {
+    const r = await api("/api/jobs/" + encodeURIComponent(b.dataset.job), action === "delete"
+      ? { method: "DELETE" } : { body: { action } });
+    if (!r.ok) toast(r.error);
+    await pollJobs();
+  } catch { toast("任务操作失败，请检查连接后重试"); }
+  finally { b.disabled = false; }
+};
 
 function alistState(u) {
   if (!u) return "";

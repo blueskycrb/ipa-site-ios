@@ -2,7 +2,7 @@ name: Build and test server
 
 on:
   push:
-    branches: [main, fix/native-store-auth]
+    branches: [main, fix/native-store-auth, feat/parallel-install]
     paths:
       - "server/**"
       - ".github/workflows/build-server.yml"
@@ -24,7 +24,7 @@ jobs:
       - name: Verify runtime tools
         run: |
           docker run --rm --entrypoint ipatool ipa-site:latest --version
-          docker run --rm -e PYTHONPYCACHEPREFIX=/tmp/pycache --entrypoint python ipa-site:latest -m py_compile /app/server.py /app/store_proof.py
+          docker run --rm -e PYTHONPYCACHEPREFIX=/tmp/pycache --entrypoint python ipa-site:latest -m py_compile /app/server.py /app/store_proof.py /app/parallel_install.py
       - name: Export image
         run: docker save ipa-site:latest | gzip -1 > ipa-site-amd64.tar.gz
       - uses: actions/upload-artifact@v4

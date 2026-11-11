@@ -79,6 +79,16 @@ struct SignButton: View {
     @State private var progress: String?
     @State private var certs: [CertInfo] = []
     @State private var choosing = false
+    @State private var selectedCert = ""
+    @State private var parallelInstall = false
+    @State private var copyName = ""
+    @State private var serverSupportsParallel = false
+
+    private var selectedCertificate: CertInfo? { certs.first { $0.id == selectedCert } }
+    private var canSign: Bool {
+        guard let cert = selectedCertificate, !cert.isExpired, cert.matchesProfile != false else { return false }
+        return !parallelInstall || (serverSupportsParallel && cert.appID?.hasSuffix("*") == true && copyName.count <= 40)
+    }
 
     private var signable: Bool {
         name.range(of: #"\.(ipa|tipa)$"#, options: [.regularExpression, .caseInsensitive]) != nil
@@ -89,9 +99,52 @@ struct SignButton: View {
             Button(progress ?? "证书签名") { Task { await begin() } }
                 .buttonStyle(.bordered)
                 .disabled(progress != nil)
-                .confirmationDialog("用哪个证书签名？", isPresented: $choosing, titleVisibility: .visible) {
-                    ForEach(certs) { c in
-                        Button(c.label ?? c.cn ?? c.id) { Task { await run(c.id) } }
+                .sheet(isPresented: $choosing) {
+                    NavigationStack {
+                        Form {
+                            Section("签名证书") {
+                                Picker("证书", selection: $selectedCert) {
+                                    ForEach(certs) { c in
+                                        Text((c.label ?? c.cn ?? c.id) + (c.isExpired ? "（已过期）" : "")).tag(c.id)
+                                    }
+                                }
+                                if selectedCertificate?.matchesProfile == false {
+                                    Text("证书与描述文件不匹配，请在证书管理中重新导入。").foregroundColor(.red)
+                                }
+                            }
+                            Section {
+                                Toggle("与原应用并存安装", isOn: $parallelInstall)
+                                    .disabled(!serverSupportsParallel)
+                                if parallelInstall {
+                                    TextField("副本名称（留空为应用名 + 副本）", text: $copyName)
+                                        .onChange(of: copyName) { value in
+                                            if value.count > 40 { copyName = String(value.prefix(40)) }
+                                        }
+                                    if selectedCertificate?.appID?.hasSuffix("*") != true {
+                                        Text("当前描述文件不支持并存安装，请选择 App ID 带 * 的通配描述文件。").foregroundColor(.red)
+                                    }
+                                }
+                            } footer: {
+                                if !serverSupportsParallel {
+                                    Text("服务器版本暂不支持并存安装，请先更新服务端。")
+                                } else if parallelInstall {
+                                    Text("生成独立副本，保留官方版，两份数据独立。副本以后更新沿用同一标识。副本会移除分享扩展、小组件、Watch 和 App Clip，以及原应用的链接注册。部分应用的登录、推送或内购可能不可用。")
+                                } else {
+                                    Text("保留应用原标识。不能用个人证书直接覆盖 App Store 官方版；手机已有官方版时可开启并存安装。")
+                                }
+                            }
+                        }
+                        .navigationTitle("签名安装")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) { Button("取消") { choosing = false } }
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("开始签名") {
+                                    choosing = false
+                                    Task { await run(selectedCert) }
+                                }.disabled(!canSign)
+                            }
+                        }
                     }
                 }
         }
@@ -105,11 +158,13 @@ struct SignButton: View {
                 return
             }
             certs = r.certs
+            serverSupportsParallel = r.parallelInstallSupported == true
             if certs.isEmpty {
                 toast = "还没有证书：请先在「设置 → 证书管理」导入证书"
-            } else if certs.count == 1 {
-                await run(certs[0].id)
             } else {
+                selectedCert = certs.first(where: { !$0.isExpired && $0.matchesProfile != false })?.id ?? certs[0].id
+                parallelInstall = false
+                copyName = ""
                 choosing = true
             }
         } catch {
@@ -130,13 +185,16 @@ struct SignButton: View {
                 src = "server"
                 progress = "排队中…"
             }
-            let job = try await API.sign(source: src, name: file, cert: cert)
+            let job = try await API.sign(source: src, name: file, cert: cert,
+                                         parallelInstall: parallelInstall, copyName: copyName)
             let j = try await waitForSignJob(job.id) { progress = $0 }
             progress = nil
             let link = (mode == "trollstore" ? j.trollstoreURL : nil) ?? j.installURL ?? j.trollstoreURL
             if let s = link, let url = URL(string: s) {
                 toast = "签名完成：\(j.appName ?? name)，在弹窗里点「安装」"
-                openURL(url)
+                openURL(url) { accepted in
+                    if !accepted { toast = "系统未接受安装链接，请检查安装方式；也可在「文件 → 已签名」中重新安装。" }
+                }
             }
             await onDone?()
         } catch {
@@ -258,6 +316,9 @@ struct SignedAppRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(item.appName ?? item.sourceName ?? "") \(item.version ?? "")").font(.subheadline).lineLimit(2)
                     Text("\(item.bundleID ?? "") · \(fmtSize(item.size))").font(.caption).foregroundColor(.secondary).lineLimit(1)
+                    if item.parallelInstall == true {
+                        Text("并存副本 · 与官方版数据独立").font(.caption).foregroundColor(.secondary)
+                    }
                     Text(certLine).font(.caption).foregroundColor(.secondary).lineLimit(1)
                     if item.isDead {
                         Text("证书\(item.certDeleted == true ? "已删除" : "已过期")，装不上了，请换证书重签")

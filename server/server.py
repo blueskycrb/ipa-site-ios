@@ -42,6 +42,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from store_proof import StoreProofError, StoreProofSetup
+from parallel_install import (ParallelInstallError, parallel_identity, prepare_parallel_ipa,
+                              profile_allows, validate_copy_name)
+from download_control import DownloadCancelled, DownloadControl
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -464,14 +467,16 @@ def parse_output(stdout, stderr, returncode):
     return lines
 
 
-def run_ipatool(args, timeout=120, account=None):
+def run_ipatool(args, timeout=120, account=None, control=None):
     """运行 ipatool 并返回解析后的 JSON 日志行列表；account 为空时用当前账号。"""
     prepare_store_proof()
     try:
-        proc = subprocess.run(
-            ipatool_cmd(args), capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, creationflags=NO_WINDOW, env=ipatool_env(account),
-        )
+        kwargs = dict(text=True, encoding="utf-8", errors="replace",
+                      creationflags=NO_WINDOW, env=ipatool_env(account))
+        if control is None:
+            proc = subprocess.run(ipatool_cmd(args), capture_output=True, timeout=timeout, **kwargs)
+        else:
+            proc = control.run(ipatool_cmd(args), timeout=timeout, **kwargs)
     except subprocess.TimeoutExpired:
         raise IpatoolError("ipatool 执行超时")
     return parse_output(proc.stdout, proc.stderr, proc.returncode)
@@ -790,7 +795,8 @@ def run_download(job):
             pass
 
     try:
-        return run_ipatool(download_args(job, version_id), timeout=60 * 60, account=job.get("account"))
+        return run_ipatool(download_args(job, version_id), timeout=60 * 60,
+                           account=job.get("account"), control=job["_control"])
     except IpatoolError as e:
         low = str(e).lower()
         # 许可、账号层面的错误换个下载方式也一样，不用再白等一次
@@ -800,7 +806,8 @@ def run_download(job):
             raise
         # 指定的版本 ID 不行时，退回 ipatool 默认方式再试一次
         job["note"] = f"按最新版本 ID 下载失败（{e}），已改用 ipatool 默认方式重试"
-        return run_ipatool(download_args(job, None), timeout=60 * 60, account=job.get("account"))
+        return run_ipatool(download_args(job, None), timeout=60 * 60,
+                           account=job.get("account"), control=job["_control"])
 
 
 def explain_download_error(msg):
@@ -818,29 +825,47 @@ def explain_download_error(msg):
 def download_worker():
     while True:
         job_id = job_queue.get()
-        job = jobs[job_id]
+        with jobs_lock:
+            job = jobs.get(job_id)
+        if job is None or job["_control"].cancelled:
+            job_queue.task_done()
+            continue
+        control = job["_control"]
+        with control.lock:
+            if control.paused:
+                job_queue.put(job_id)
+                job_queue.task_done()
+                time.sleep(0.2)
+                continue
+            job["status"] = "running"
+            job["startedAt"] = time.time()
         work = PARTIAL_DIR / job_id
         work.mkdir(parents=True, exist_ok=True)
         job["workDir"] = work
-        job["status"] = "running"
-        job["startedAt"] = time.time()
         try:
+            control.checkpoint()
             lines = run_download(job)
             res = pick(lines, "output")
             src = Path(res["output"]) if res.get("output") else None
             name = None
-            if src and src.is_file():
-                name = rename_readable(src, {"name": job.get("name"), "bundleID": job.get("bundleID"),
-                                             "appID": job.get("appID"), "icon": job.get("icon"),
-                                             "accountEmail": job.get("accountEmail")})
-            job["status"] = "done"
-            job["file"] = name
-            job["purchased"] = bool(res.get("purchased"))
+            with control.completing():
+                if src and src.is_file():
+                    name = rename_readable(src, {"name": job.get("name"), "bundleID": job.get("bundleID"),
+                                                 "appID": job.get("appID"), "icon": job.get("icon"),
+                                                 "accountEmail": job.get("accountEmail")})
+                job["status"] = "done"
+                job["file"] = name
+                job["purchased"] = bool(res.get("purchased"))
             if job["file"] and ALIST_AUTO_UPLOAD and alist_enabled():
                 enqueue_alist(job["file"])
+        except DownloadCancelled:
+            job["status"] = "cancelled"
         except (IpatoolError, OSError) as e:
-            job["status"] = "error"
-            job["error"] = explain_download_error(str(e))
+            job["status"] = "cancelled" if control.cancelled else "error"
+            if not control.cancelled:
+                job["error"] = explain_download_error(str(e))
+        with control.lock:
+            control.finished = True
         shutil.rmtree(work, ignore_errors=True)
         job["finishedAt"] = time.time()
         job_queue.task_done()
@@ -848,7 +873,7 @@ def download_worker():
 
 def job_progress(job):
     """下载中时，按任务临时目录里的文件大小估算进度和速度。"""
-    if job["status"] != "running":
+    if job["status"] not in ("running", "paused"):
         return None
     size = 0
     try:
@@ -858,6 +883,9 @@ def job_progress(job):
         pass
     now = time.time()
     last = job.get("_sample")
+    if job["status"] == "paused":
+        job["speed"] = 0
+        return size
     if not last or now - last[0] >= 1:
         if last:
             job["speed"] = max(0, (size - last[1]) / (now - last[0]))
@@ -1491,7 +1519,23 @@ def ipa_info(path):
 
 def enqueue_sign(source, name, cert_id, **extra):
     check_plain_name(name)
-    load_cert(cert_id)
+    if source not in ("server", "alist"):
+        raise IpatoolError("签名来源无效")
+    cert = load_cert(cert_id)
+    if cert_expired(cert_id):
+        raise IpatoolError("证书或描述文件已过期，请先更换")
+    if cert.get("matchesProfile") is False:
+        raise IpatoolError("证书与描述文件不匹配，请重新导入匹配的一套")
+    if not isinstance(extra.get("parallelInstall", False), bool):
+        raise IpatoolError("并存安装选项必须是布尔值")
+    try:
+        extra["copyName"] = validate_copy_name(extra.get("copyName", ""))
+    except ParallelInstallError as exc:
+        raise IpatoolError(str(exc)) from exc
+    if extra.get("parallelInstall") and not extra.get("parallelBundleID"):
+        pattern = (cert.get("appID") or "").partition(".")[2]
+        if not pattern.endswith("*") or pattern.count("*") != 1:
+            raise IpatoolError("并存安装需要通配描述文件（App ID 含 *），当前证书描述文件不支持")
     if not extra.get("fromSigned"):   # 用签好的文件重签时不需要原文件
         if source == "server" and not (DOWNLOAD_DIR / name).is_file():
             raise IpatoolError("服务器上没有这个文件")
@@ -1513,6 +1557,9 @@ def enqueue_resign(key, cert_id):
         raise IpatoolError("没有这个签名记录")
     path = signed_path_of(key)
     extra = {"replaces": key, "icon": info.get("icon")}
+    if info.get("parallelInstall"):
+        extra.update({k: info.get(k) for k in ("parallelInstall", "originalBundleID", "originalAppName", "copyName")})
+        extra["parallelBundleID"] = info["bundleID"]
     if path.is_file():
         return enqueue_sign(info.get("source") or "server", info.get("sourceName") or path.name, cert_id,
                             fromSigned=key, **extra)
@@ -1565,10 +1612,31 @@ def run_sign(job):
         else:
             job["status"] = "downloading"
             _fetch_to(alist_link(job["name"])[0], src, job)
+        info = ipa_info(src)
+        with zipfile.ZipFile(src) as archive:
+            root = next(n for n in archive.namelist() if re.fullmatch(r"Payload/[^/]+\.app/Info\.plist", n))
+            values = plistlib.loads(archive.read(root))
+            executable = values.get("CFBundleExecutable")
+            if executable and macho_cryptid(archive.read(root[:-len("Info.plist")] + executable)) == 1:
+                raise IpatoolError("这个 IPA 的主程序尚未解密，请先解密后再证书签名")
+        parallel = {}
+        if job.get("parallelInstall"):
+            try:
+                parallel = parallel_identity(info, cert, job.get("copyName", ""), previous=job)
+                prepared = work / "parallel.ipa"
+                prepare_parallel_ipa(src, prepared, parallel)
+            except (ParallelInstallError, plistlib.InvalidFileException) as exc:
+                raise IpatoolError(str(exc)) from exc
+            src = prepared
+            job.update(parallel)
+        elif not profile_allows(cert.get("appID"), info.get("bundleID") or ""):
+            raise IpatoolError("描述文件不允许这个应用标识，请使用匹配的描述文件或通配描述文件")
         job["status"] = "signing"
         out_name = re.sub(r"\.tipa$", ".ipa", job["name"], flags=re.I)
         if not out_name.lower().endswith(".ipa"):
             out_name += ".ipa"
+        if parallel:
+            out_name = out_name[:-4] + "_副本.ipa"
         out = SIGNED_DIR / job["cert"] / out_name
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp_out = work / "signed.ipa"
@@ -1579,6 +1647,8 @@ def run_sign(job):
             detail = (p.stderr or p.stdout).strip().splitlines()
             raise IpatoolError("签名失败：" + (" ".join(detail[-3:]) if detail else f"zsign 退出码 {p.returncode}"))
         info = ipa_info(tmp_out)
+        if parallel and info.get("bundleID") != parallel["parallelBundleID"]:
+            raise IpatoolError("签名结果的副本标识不一致，未保存输出")
         icon = ((load_meta().get(job["name"]) or {}).get("icon") or job.get("icon")
                 or find_icon(tmp_out, info.get("bundleID")))
         os.replace(tmp_out, out)
@@ -1588,7 +1658,7 @@ def run_sign(job):
             meta = load_signed_meta()
             meta[key] = {**info, "source": job["source"], "sourceName": job["name"], "signedAt": time.time(),
                          "cert": job["cert"], "teamID": cert.get("teamID"), "size": out.stat().st_size,
-                         "icon": icon}
+                         "icon": icon, **parallel}
             # 换证书重签后，旧证书已经过期 / 删除的那份没用了，顺手删掉
             if old and old != key and old in meta and cert_expired(old.partition("/")[0]):
                 signed_path_of(old).unlink(missing_ok=True)
@@ -1608,7 +1678,7 @@ def sign_worker():
         try:
             run_sign(job)
             job["status"] = "done"
-        except (IpatoolError, OSError, zipfile.BadZipFile, subprocess.TimeoutExpired) as e:
+        except (IpatoolError, OSError, ValueError, KeyError, StopIteration, struct.error, zipfile.BadZipFile, subprocess.TimeoutExpired) as e:
             job["status"], job["error"] = "error", str(e)
         job["finishedAt"] = time.time()
         sign_queue.task_done()
@@ -2269,6 +2339,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.api_purchase(data)
             if url.path == "/api/download":
                 return self.api_download(data)
+            if url.path.startswith("/api/jobs/") and url.path != "/api/jobs/clear":
+                return self.api_job_action(url.path[len("/api/jobs/"):], data.get("action"))
             if url.path == "/api/alist/upload":
                 if not alist_enabled():
                     return self.send_error_json("还没配置 Alist：请在 .env 里填写 ALIST_URL、ALIST_USERNAME、ALIST_PASSWORD")
@@ -2281,7 +2353,8 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/certs/import":
                 return self.api_import_certs(data)
             if url.path == "/api/sign":
-                job = enqueue_sign(data.get("source") or "alist", data.get("name") or "", data.get("cert") or "")
+                job = enqueue_sign(data.get("source") or "alist", data.get("name") or "", data.get("cert") or "",
+                                   parallelInstall=data.get("parallelInstall", False), copyName=data.get("copyName", ""))
                 return self.send_json({"ok": True, "job": job})
             if url.path == "/api/signed/resign":
                 job = enqueue_resign(data.get("key") or "", data.get("cert") or "")
@@ -2311,7 +2384,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if url.path == "/api/jobs/clear":
                 with jobs_lock:
-                    for k in [k for k, j in jobs.items() if j["status"] in ("done", "error")]:
+                    for k in [k for k, j in jobs.items() if j["status"] in ("done", "error", "cancelled")]:
                         del jobs[k]
                 return self.send_json({"ok": True})
             self.send_error_json("Not found", 404)
@@ -2383,6 +2456,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         url = urllib.parse.urlparse(self.path)
         try:
+            if url.path.startswith("/api/jobs/"):
+                return self.api_job_action(url.path[len("/api/jobs/"):], "delete")
             if url.path.startswith("/api/files/"):
                 p = self.safe_file(url.path[len("/api/files/"):])
                 if not p:
@@ -2532,7 +2607,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ----- 证书签名
     def api_certs(self):
-        self.send_json({"ok": True, "zsign": bool(ZSIGN), "installEnabled": install_enabled(), "certs": list_certs()})
+        self.send_json({"ok": True, "zsign": bool(ZSIGN), "installEnabled": install_enabled(),
+                        "parallelInstallSupported": True, "certs": list_certs()})
 
     def api_add_cert(self, d):
         try:
@@ -2751,17 +2827,52 @@ class Handler(BaseHTTPRequestHandler):
             "accountEmail": account_email(current_account()),
         }
         with jobs_lock:
+            job["_control"] = DownloadControl()
             jobs[job["id"]] = job
         job_queue.put(job["id"])
-        self.send_json({"ok": True, "job": job})
+        self.send_json({"ok": True, "job": {k: v for k, v in job.items()
+                                            if not k.startswith("_") and k != "workDir"}})
+
+    def api_job_action(self, job_id, action):
+        if action not in ("pause", "resume", "cancel", "delete"):
+            return self.send_error_json("任务操作无效")
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job is None:
+                return self.send_error_json("任务不存在或已删除", 404)
+            control = job["_control"]
+            with control.lock:
+                terminal = job["status"] in ("done", "error", "cancelled") or control.finished
+                if action in ("cancel", "delete"):
+                    if not terminal:
+                        control.cancel()
+                        job.update(status="cancelled", finishedAt=time.time(), speed=0)
+                    if action == "delete":
+                        jobs.pop(job_id, None)
+                elif terminal:
+                    return self.send_error_json("这个任务已结束，不能暂停或继续")
+                else:
+                    try:
+                        if action == "pause":
+                            control.pause()
+                            job.update(status="paused", speed=0)
+                        else:
+                            control.resume()
+                            job["status"] = "running" if job.get("startedAt") else "queued"
+                            job.pop("_sample", None)
+                    except ValueError as exc:
+                        return self.send_error_json(str(exc))
+        return self.send_json({"ok": True})
 
     def api_jobs(self):
         with jobs_lock:
             out = []
             for j in sorted(jobs.values(), key=lambda j: j["createdAt"], reverse=True):
                 downloaded = job_progress(j)
-                j = {k: v for k, v in j.items() if k not in ("workDir", "_sample")}
+                j = {k: v for k, v in j.items() if not k.startswith("_") and k != "workDir"}
                 j["downloaded"] = downloaded
+                j["controlsSupported"] = True
+                j["pauseSupported"] = DownloadControl.pause_supported
                 out.append(j)
         self.send_json({"ok": True, "jobs": out})
 
