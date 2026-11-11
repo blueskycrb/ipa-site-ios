@@ -882,6 +882,8 @@ def job_progress(job):
     """下载中时，按任务临时目录里的文件大小估算进度和速度。"""
     if job["status"] not in ("running", "paused"):
         return None
+    if "workDir" not in job:
+        return 0  # Paused while still queued: no temporary directory yet.
     size = 0
     try:
         for p in job["workDir"].iterdir():

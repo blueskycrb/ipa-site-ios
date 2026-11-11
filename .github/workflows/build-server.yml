@@ -17,14 +17,14 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Test helper initialization
+      - name: Test server actions and helpers
         run: python3 -m unittest discover -s server -p 'test_*.py' -v
       - name: Build amd64 image and test pinned ipatool
         run: docker build --progress=plain -t ipa-site:latest server
       - name: Verify runtime tools
         run: |
           docker run --rm --entrypoint ipatool ipa-site:latest --version
-          docker run --rm -e PYTHONPYCACHEPREFIX=/tmp/pycache --entrypoint python ipa-site:latest -m py_compile /app/server.py /app/store_proof.py /app/parallel_install.py
+          docker run --rm -e PYTHONPYCACHEPREFIX=/tmp/pycache --entrypoint python ipa-site:latest -m py_compile /app/server.py /app/store_proof.py /app/parallel_install.py /app/download_control.py
       - name: Export image
         run: docker save ipa-site:latest | gzip -1 > ipa-site-amd64.tar.gz
       - uses: actions/upload-artifact@v4
