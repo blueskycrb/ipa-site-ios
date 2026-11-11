@@ -38,9 +38,11 @@ struct JobsView: View {
             .toolbar {
                 Button("清除已完成") {
                     Task {
-                        try? await API.clearJobs()
-                        if decryptEnabled { try? await API.clearDecryptJobs() }
-                        await refresh()
+                        do {
+                            try await API.clearJobs()
+                            if decryptEnabled { try await API.clearDecryptJobs() }
+                            await refresh()
+                        } catch { toast = error.localizedDescription }
                     }
                 }
             }

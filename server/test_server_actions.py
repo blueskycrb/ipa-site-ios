@@ -52,7 +52,7 @@ class ServerActionTests(unittest.TestCase):
         tool.chmod(0o700)
         certdir = cls.root / 'certs' / 'aabbccdd'
         certdir.mkdir(parents=True)
-        (certdir / 'cert.json').write_text(json.dumps({'password':'fixture','appID':'PREFIX.*','teamID':'TEAM',
+        (certdir / 'cert.json').write_text(json.dumps({'id':'aabbccdd','password':'fixture','appID':'PREFIX.*','teamID':'TEAM',
             'certExpires':time.time()+86400,'profileExpires':time.time()+86400,'matchesProfile':True}))
         with socket.socket() as s:
             s.bind(('127.0.0.1', 0))
