@@ -43,7 +43,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from store_proof import StoreProofError, StoreProofSetup
 from parallel_install import (ParallelInstallError, parallel_identity, prepare_parallel_ipa,
-                              profile_allows, validate_copy_name)
+                              validate_copy_name)
 from download_control import DownloadCancelled, DownloadControl
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1639,8 +1639,10 @@ def run_sign(job):
                 raise IpatoolError(str(exc)) from exc
             src = prepared
             job.update(parallel)
-        elif not profile_allows(cert.get("appID"), info.get("bundleID") or ""):
-            raise IpatoolError("描述文件不允许这个应用标识，请使用匹配的描述文件或通配描述文件")
+        # Ordinary signing retains the established zsign behavior. Dedicated
+        # profiles can be used by existing signing workflows whose source ID
+        # differs from the profile ID; only parallel copies require the strict
+        # identity policy above, since their separately assigned ID must stick.
         job["status"] = "signing"
         out_name = re.sub(r"\.tipa$", ".ipa", job["name"], flags=re.I)
         if not out_name.lower().endswith(".ipa"):

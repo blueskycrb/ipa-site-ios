@@ -170,6 +170,38 @@ class ServerActionTests(unittest.TestCase):
         finally:
             self.request('/api/jobs/'+third, {'action':'cancel'})
 
+    def test_normal_sign_and_resign_accept_existing_fixed_profile_workflow(self):
+        source=self.downloads/'normal-sign.ipa'
+        with zipfile.ZipFile(source,'w') as z:
+            z.writestr('Payload/Test.app/Info.plist',plistlib.dumps({
+                'CFBundleIdentifier':'com.example.normal','CFBundleName':'Normal',
+                'CFBundleExecutable':'Test','CFBundleShortVersionString':'1.0'}))
+            z.writestr('Payload/Test.app/Test',struct.pack('<IIIIIIII',0xfeedfacf,0x100000c,0,2,0,0,0,0))
+            z.writestr('Payload/Test.app/PlugIns/Share.appex/keep.txt',b'keep extension')
+        original=source.read_bytes()
+        def completed(job):
+            result=self.wait(lambda:next((j for j in self.request('/api/sign/jobs')['jobs']
+                if j['id']==job['id'] and j['status'] in ('done','error')),None))
+            self.assertEqual(result['status'],'done',result.get('error'))
+            return result
+        # Both older clients (no option) and the new form (false) must retain
+        # the established zsign path even with a dedicated profile.
+        for options in ({}, {'parallelInstall':False}):
+            with self.subTest(options=options):
+                job=self.request('/api/sign',{'source':'server','name':source.name,
+                    'cert':'11223344',**options})['job']
+                signed=completed(job)
+                self.assertEqual(signed['bundleID'],'com.example.normal')
+                self.assertNotIn('parallelInstall',next(x for x in self.request('/api/signed')['items']
+                    if x['key']==signed['key']))
+                output=self.root/'signed'/signed['key']
+                with zipfile.ZipFile(output) as z:
+                    self.assertEqual(z.read('Payload/Test.app/PlugIns/Share.appex/keep.txt'),b'keep extension')
+                resigned=completed(self.request('/api/signed/resign',{
+                    'key':signed['key'],'cert':'11223344'})['job'])
+                self.assertEqual(resigned['key'],signed['key'])
+                self.assertEqual(source.read_bytes(),original)
+
     def test_parallel_sign_and_resign_keep_identity_and_original(self):
         source=self.downloads/'original.ipa'
         with zipfile.ZipFile(source,'w') as z:
